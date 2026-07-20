@@ -1,0 +1,19 @@
+[Unit]
+Description=Sinty Debug Bridge daemon
+# The bridge exists only on a development image. This condition is the gate, not
+# the Settings switch: a unit that could be started by hand while dev is locked
+# would make the switch the only thing standing between a locked device and an
+# open network listener. sdbd enforces the same check itself, so neither side is
+# load-bearing alone.
+ConditionPathExists=/etc/atom/dev.enabled
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/sdbd
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
