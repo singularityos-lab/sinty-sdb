@@ -35,12 +35,23 @@ func run(args []string) int {
 	socket := fs.String("socket", "/run/sinty-sdb.sock", "unix socket for the local control API")
 	listen := fs.String("listen", "", "TCP address to serve (default all interfaces on the SDB port)")
 	gate := fs.String("gate", "/etc/atom/dev.enabled", "development marker that must exist for sdbd to run")
+	optIn := fs.String("opt-in", "/var/lib/sinty-sdb/enabled", "per-bridge marker the owner turns on to allow the bridge to run")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
 	if _, err := os.Stat(*gate); err != nil {
 		fmt.Fprintf(os.Stderr, "sdbd: the debug bridge is available only on a development image (%s)\n", *gate)
+		return 1
+	}
+
+	// The bridge needs its own opt-out, kept separate from the development gate
+	// above. Turning the bridge off must not clear the development marker: that
+	// marker governs the whole image, and removing it would also take away the
+	// control that turns the bridge back on, so off would be a one-way door.
+	// Absent means off, so a fresh image carries no listener until the owner asks.
+	if _, err := os.Stat(*optIn); err != nil {
+		fmt.Fprintf(os.Stderr, "sdbd: the debug bridge has not been turned on (%s)\n", *optIn)
 		return 1
 	}
 

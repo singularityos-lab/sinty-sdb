@@ -6,6 +6,7 @@ Description=Sinty Debug Bridge daemon
 # open network listener. sdbd enforces the same check itself, so neither side is
 # load-bearing alone.
 ConditionPathExists=/etc/atom/dev.enabled
+ConditionPathExists=/var/lib/sinty-sdb/enabled
 After=network.target
 Wants=network.target
 
