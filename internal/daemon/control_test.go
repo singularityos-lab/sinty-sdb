@@ -28,8 +28,8 @@ func TestControlContract(t *testing.T) {
 		rec := h.control(t, http.MethodGet, "/pairing/state", nil)
 		body := decode(t, rec.Body.Bytes())
 		for _, k := range []string{
-			"active", "code", "expires_at", "pending_fingerprint",
-			"pending_fingerprint_display", "pending_label", "attempts", "locked_until",
+			"active", "code", "pending_fingerprint",
+			"pending_fingerprint_display", "pending_label", "attempts",
 		} {
 			if _, ok := body[k]; !ok {
 				t.Errorf("pairing state missing %q (got %v)", k, body)
@@ -40,6 +40,13 @@ func TestControlContract(t *testing.T) {
 		}
 		if body["code"] != "" {
 			t.Error("a fresh daemon should expose no code")
+		}
+		// An idle daemon has no deadlines, so it must send none. A year-1 stamp
+		// would read as a real deadline to a strict client.
+		for _, k := range []string{"expires_at", "locked_until"} {
+			if _, ok := body[k]; ok {
+				t.Errorf("idle pairing state should omit %q (got %v)", k, body)
+			}
 		}
 	})
 
