@@ -3,11 +3,13 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -411,4 +413,78 @@ func wrongCode(code string) string {
 		return "111111"
 	}
 	return "000000"
+}
+
+// A live session must end when the daemon is stopped. Closing the listener only
+// refuses new peers, so without this an already-connected host would keep its
+// session and disabling the bridge would not actually end access.
+func TestShutdownDropsLiveConnections(t *testing.T) {
+	dir := t.TempDir()
+	id, err := keys.LoadOrCreate(dir, "device")
+	if err != nil {
+		t.Fatalf("device identity: %v", err)
+	}
+	store, err := keystore.Open(filepath.Join(dir, "keystore.json"))
+	if err != nil {
+		t.Fatalf("keystore: %v", err)
+	}
+	srv, err := New(Config{
+		Identity: id,
+		Store:    store,
+		Pairing:  pairing.NewManager(),
+		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("daemon: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { _ = srv.Serve(ctx, ln) }()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	// Wait for the daemon to have registered the session, so the control below
+	// is about shutdown and not about a race with accept.
+	var seen bool
+	for i := 0; i < 200; i++ {
+		srv.mu.Lock()
+		seen = len(srv.live) == 1
+		srv.mu.Unlock()
+		if seen {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !seen {
+		t.Fatal("daemon never registered the live session")
+	}
+
+	// Control: while the daemon is up the session stays open, so a read blocks
+	// rather than returning. Without this the test would pass even if the
+	// connection had never been alive.
+	buf := make([]byte, 1)
+	_ = conn.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+	if _, err := conn.Read(buf); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("live session should have stayed open, read returned %v", err)
+	}
+
+	cancel()
+
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := conn.Read(buf); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("session survived shutdown, read returned %v", err)
+	}
+	srv.mu.Lock()
+	remaining := len(srv.live)
+	srv.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("daemon still tracks %d session(s) after shutdown", remaining)
+	}
 }

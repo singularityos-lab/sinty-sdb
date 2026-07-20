@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/singularityos-lab/sinty-sdb/internal/keys"
@@ -42,6 +43,9 @@ type Server struct {
 	store *keystore.Store
 	pair  *pairing.Manager
 	log   *slog.Logger
+
+	mu   sync.Mutex
+	live map[net.Conn]struct{}
 }
 
 // New builds a Server. Every dependency is required: a nil keystore would mean
@@ -60,7 +64,43 @@ func New(cfg Config) (*Server, error) {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Server{id: cfg.Identity, store: cfg.Store, pair: cfg.Pairing, log: log}, nil
+	return &Server{
+		id:    cfg.Identity,
+		store: cfg.Store,
+		pair:  cfg.Pairing,
+		log:   log,
+		live:  make(map[net.Conn]struct{}),
+	}, nil
+}
+
+// track registers a live connection so shutdown can close it, and returns the
+// function that unregisters it.
+func (s *Server) track(c net.Conn) func() {
+	s.mu.Lock()
+	s.live[c] = struct{}{}
+	s.mu.Unlock()
+	return func() {
+		s.mu.Lock()
+		delete(s.live, c)
+		s.mu.Unlock()
+	}
+}
+
+// dropLive closes every connection still open. Closing the listener alone only
+// refuses new peers: an already-connected host would keep its session until it
+// chose to leave, so disabling the bridge would not actually end access.
+func (s *Server) dropLive() int {
+	s.mu.Lock()
+	conns := make([]net.Conn, 0, len(s.live))
+	for c := range s.live {
+		conns = append(conns, c)
+	}
+	s.live = make(map[net.Conn]struct{})
+	s.mu.Unlock()
+	for _, c := range conns {
+		_ = c.Close()
+	}
+	return len(conns)
 }
 
 // Fingerprint returns the device's own key fingerprint.
@@ -80,6 +120,9 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	go func() {
 		<-ctx.Done()
 		_ = ln.Close()
+		if n := s.dropLive(); n > 0 {
+			s.log.Info("closed live sessions on shutdown", "count", n)
+		}
 	}()
 	for {
 		conn, err := ln.Accept()
@@ -97,6 +140,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 // peer goes away or asks for something it may not have.
 func (s *Server) handle(raw net.Conn) {
 	defer raw.Close()
+	defer s.track(raw)()
 
 	var peer string
 	tlsConn := tls.Server(raw, protocol.ServerTLS(s.id, &peer))
