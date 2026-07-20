@@ -1,0 +1,201 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Mirko Brombin <brombin94@gmail.com>
+
+// Package daemon is sdbd, the device side of SDB.
+//
+// It runs two listeners. The TCP one speaks TLS to development hosts and is the
+// only surface reachable from the network. The unix one is a local control API
+// the Settings and recovery UIs use to drive pairing and manage the keyring; it
+// is never exposed off the machine.
+//
+// The daemon holds no privilege of its own. Phase 1 stops at deciding who may
+// talk to it; anything that would need root belongs to a later phase and goes
+// through the ush broker, which approves per action and leaves a receipt.
+package daemon
+
+import (
+	"context"
+	"crypto/tls"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"time"
+
+	"github.com/singularityos-lab/sinty-sdb/internal/keys"
+	"github.com/singularityos-lab/sinty-sdb/internal/keystore"
+	"github.com/singularityos-lab/sinty-sdb/internal/pairing"
+	"github.com/singularityos-lab/sinty-sdb/internal/protocol"
+)
+
+// Config configures a Server.
+type Config struct {
+	Identity *keys.Identity
+	Store    *keystore.Store
+	Pairing  *pairing.Manager
+	Log      *slog.Logger
+}
+
+// Server is the device daemon.
+type Server struct {
+	id    *keys.Identity
+	store *keystore.Store
+	pair  *pairing.Manager
+	log   *slog.Logger
+}
+
+// New builds a Server. Every dependency is required: a nil keystore would mean
+// a daemon with no notion of who is trusted, which must never be reachable.
+func New(cfg Config) (*Server, error) {
+	if cfg.Identity == nil {
+		return nil, errors.New("sdbd: no device identity")
+	}
+	if cfg.Store == nil {
+		return nil, errors.New("sdbd: no keystore")
+	}
+	if cfg.Pairing == nil {
+		return nil, errors.New("sdbd: no pairing manager")
+	}
+	log := cfg.Log
+	if log == nil {
+		log = slog.Default()
+	}
+	return &Server{id: cfg.Identity, store: cfg.Store, pair: cfg.Pairing, log: log}, nil
+}
+
+// Fingerprint returns the device's own key fingerprint.
+func (s *Server) Fingerprint() string { return s.id.Fingerprint() }
+
+// ListenAndServe accepts TLS connections on addr until ctx is cancelled.
+func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", addr, err)
+	}
+	return s.Serve(ctx, ln)
+}
+
+// Serve accepts connections on ln until ctx is cancelled.
+func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
+	go func() {
+		<-ctx.Done()
+		_ = ln.Close()
+	}()
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+		go s.handle(conn)
+	}
+}
+
+// handle runs one connection: TLS handshake, then framed requests until the
+// peer goes away or asks for something it may not have.
+func (s *Server) handle(raw net.Conn) {
+	defer raw.Close()
+
+	var peer string
+	tlsConn := tls.Server(raw, protocol.ServerTLS(s.id, &peer))
+	_ = tlsConn.SetDeadline(time.Now().Add(protocol.CallTimeout))
+	if err := tlsConn.Handshake(); err != nil {
+		s.log.Warn("sdb handshake refused", "err", err.Error())
+		return
+	}
+	if peer == "" {
+		return
+	}
+
+	host, trusted := s.store.Trusted(peer)
+	if trusted {
+		if err := s.store.Touch(peer); err != nil {
+			s.log.Warn("sdb could not stamp host use", "label", host.Label, "err", err.Error())
+		}
+		s.log.Info("sdb connection from paired host", "label", host.Label)
+	} else {
+		s.log.Info("sdb connection from unpaired host", "fingerprint", keys.Display(peer))
+	}
+
+	c := protocol.NewConn(tlsConn, peer)
+	for {
+		_ = c.SetDeadline(time.Now().Add(protocol.PairingTimeout))
+		req, err := c.ReadRequest()
+		if err != nil {
+			return
+		}
+		resp := s.dispatch(c.Peer, trusted, req)
+		if err := c.WriteResponse(resp); err != nil {
+			return
+		}
+		if req.Op == protocol.OpPairSubmit && resp.OK {
+			trusted = true
+		}
+	}
+}
+
+// dispatch decides one request. An unpaired peer can do nothing except pair,
+// and only while a pairing window is open. There is no first-connection grace
+// and no fallback: an unknown key that is not pairing is refused.
+func (s *Server) dispatch(peer string, trusted bool, req protocol.Request) protocol.Response {
+	switch req.Op {
+	case protocol.OpPairBegin:
+		if trusted {
+			return protocol.Response{OK: true, Fingerprint: s.id.Fingerprint()}
+		}
+		if err := s.pair.Begin(peer, req.Label); err != nil {
+			return refuse(err)
+		}
+		return protocol.Response{OK: true, Fingerprint: s.id.Fingerprint()}
+
+	case protocol.OpPairSubmit:
+		if err := s.pair.Submit(peer, req.Code); err != nil {
+			return refuse(err)
+		}
+		label := s.labelFor(req.Label)
+		if err := s.store.Add(label, peer); err != nil {
+			return refuse(err)
+		}
+		s.log.Info("sdb host paired", "label", label, "fingerprint", keys.Display(peer))
+		return protocol.Response{OK: true, Fingerprint: s.id.Fingerprint()}
+
+	case protocol.OpHello:
+		if !trusted {
+			return refuse(errors.New("this host is not paired with the device"))
+		}
+		return protocol.Response{OK: true, Fingerprint: s.id.Fingerprint()}
+
+	case protocol.OpHostsList:
+		if !trusted {
+			return refuse(errors.New("this host is not paired with the device"))
+		}
+		return protocol.Response{OK: true, Hosts: s.store.List()}
+
+	case protocol.OpHostsRevoke:
+		if !trusted {
+			return refuse(errors.New("this host is not paired with the device"))
+		}
+		if err := s.store.Remove(req.Label); err != nil {
+			return refuse(err)
+		}
+		s.log.Info("sdb host revoked", "label", req.Label)
+		return protocol.Response{OK: true}
+
+	default:
+		return refuse(fmt.Errorf("unknown request %q", req.Op))
+	}
+}
+
+// labelFor keeps a label usable even if the host sent none.
+func (s *Server) labelFor(label string) string {
+	if label == "" {
+		return "unnamed-host"
+	}
+	return label
+}
+
+func refuse(err error) protocol.Response {
+	return protocol.Response{OK: false, Error: err.Error()}
+}

@@ -1,0 +1,414 @@
+package daemon
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/singularityos-lab/sinty-sdb/internal/client"
+	"github.com/singularityos-lab/sinty-sdb/internal/keys"
+	"github.com/singularityos-lab/sinty-sdb/internal/keystore"
+	"github.com/singularityos-lab/sinty-sdb/internal/pairing"
+	"github.com/singularityos-lab/sinty-sdb/internal/protocol"
+)
+
+// harness is a live device daemon on a loopback port, plus the pieces a test
+// needs to reach inside it.
+type harness struct {
+	srv   *Server
+	addr  string
+	store *keystore.Store
+	pair  *pairing.Manager
+}
+
+func newHarness(t *testing.T) *harness {
+	t.Helper()
+	dir := t.TempDir()
+	id, err := keys.LoadOrCreate(dir, "device")
+	if err != nil {
+		t.Fatalf("device identity: %v", err)
+	}
+	store, err := keystore.Open(filepath.Join(dir, "keystore.json"))
+	if err != nil {
+		t.Fatalf("keystore: %v", err)
+	}
+	pm := pairing.NewManager()
+	srv, err := New(Config{
+		Identity: id,
+		Store:    store,
+		Pairing:  pm,
+		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("daemon: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = srv.Serve(ctx, ln) }()
+	return &harness{srv: srv, addr: ln.Addr().String(), store: store, pair: pm}
+}
+
+// newHost builds a host identity in its own directory.
+func newHost(t *testing.T) *client.Client {
+	t.Helper()
+	id, err := keys.LoadOrCreate(t.TempDir(), "host")
+	if err != nil {
+		t.Fatalf("host identity: %v", err)
+	}
+	return client.New(id)
+}
+
+// startPairing opens a window on the device and returns the code its screen
+// would show, read back through the local control API exactly as a UI would.
+func (h *harness) startPairing(t *testing.T) string {
+	t.Helper()
+	rec := h.control(t, http.MethodPost, "/pairing/start", nil)
+	var body struct {
+		OK   bool   `json:"ok"`
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode pairing start: %v", err)
+	}
+	if !body.OK || body.Code == "" {
+		t.Fatalf("pairing start returned %s", rec.Body.String())
+	}
+	return body.Code
+}
+
+func (h *harness) control(t *testing.T, method, path string, body io.Reader) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, body)
+	rec := httptest.NewRecorder()
+	h.srv.ControlHandler().ServeHTTP(rec, req)
+	return rec
+}
+
+// TestPairThenConnectByKeyAlone walks the whole level 1 and level 2 path.
+func TestPairThenConnectByKeyAlone(t *testing.T) {
+	h := newHarness(t)
+	host := newHost(t)
+	code := h.startPairing(t)
+
+	conn, err := host.Dial(h.addr, "")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	deviceFP, err := client.PairBegin(conn, "laptop")
+	if err != nil {
+		t.Fatalf("pair begin: %v", err)
+	}
+	if deviceFP != h.srv.Fingerprint() {
+		t.Fatal("the device reported a key other than its own")
+	}
+
+	// The device must be showing this host's fingerprint before any code is
+	// typed, so the user can compare it. Read it back the way a UI would.
+	if got := h.pair.PendingFingerprint(); got != host.Fingerprint() {
+		t.Fatalf("device shows fingerprint %q, want the host's own", got)
+	}
+	t.Logf("device screen shows host key %s", keys.Display(host.Fingerprint()))
+
+	if err := client.PairSubmit(conn, "laptop", code); err != nil {
+		t.Fatalf("pair submit: %v", err)
+	}
+	conn.Close()
+
+	if _, ok := h.store.Trusted(host.Fingerprint()); !ok {
+		t.Fatal("the host key was not persisted to the keystore")
+	}
+
+	// Level 2: a fresh connection carrying no code at all, pinned to the device
+	// key learned during pairing.
+	conn2, err := host.Dial(h.addr, deviceFP)
+	if err != nil {
+		t.Fatalf("second dial: %v", err)
+	}
+	defer conn2.Close()
+	if err := client.Hello(conn2); err != nil {
+		t.Fatalf("a paired host should be accepted by key alone: %v", err)
+	}
+	hosts, err := client.ListHosts(conn2)
+	if err != nil {
+		t.Fatalf("list hosts: %v", err)
+	}
+	if len(hosts) != 1 || hosts[0].Label != "laptop" {
+		t.Fatalf("device lists %+v, want one host labelled laptop", hosts)
+	}
+	if hosts[0].LastUsed.IsZero() {
+		t.Fatal("connecting should stamp the host as used")
+	}
+	t.Log("paired host accepted with no code, keystore stamped")
+}
+
+// TestUnknownKeyIsRefused is the level 2 negative proof: a host that never
+// paired gets nothing, and there is no first-connection grace to fall back on.
+func TestUnknownKeyIsRefused(t *testing.T) {
+	h := newHarness(t)
+	stranger := newHost(t)
+
+	cases := []struct {
+		name string
+		call func(*protocol.Conn) error
+	}{
+		{"hello", client.Hello},
+		{"list paired hosts", func(c *protocol.Conn) error { _, err := client.ListHosts(c); return err }},
+		{"revoke a host", func(c *protocol.Conn) error { return client.Revoke(c, "laptop") }},
+		{"pair without an open window", func(c *protocol.Conn) error {
+			_, err := client.PairBegin(c, "stranger")
+			return err
+		}},
+		{"submit a code without an open window", func(c *protocol.Conn) error {
+			return client.PairSubmit(c, "stranger", "000000")
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, err := stranger.Dial(h.addr, "")
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			defer conn.Close()
+			err = tc.call(conn)
+			if err == nil {
+				t.Fatal("an unpaired host was allowed through")
+			}
+			t.Logf("refused: %v", err)
+		})
+	}
+	if len(h.store.List()) != 0 {
+		t.Fatal("a refused host left an entry in the keystore")
+	}
+}
+
+// TestPairingRefusalsOverTheWire proves the code rules hold through the real
+// transport, not only inside the pairing package.
+func TestPairingRefusalsOverTheWire(t *testing.T) {
+	t.Run("wrong code is refused and nothing is stored", func(t *testing.T) {
+		h := newHarness(t)
+		host := newHost(t)
+		code := h.startPairing(t)
+
+		conn, err := host.Dial(h.addr, "")
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		defer conn.Close()
+		if _, err := client.PairBegin(conn, "laptop"); err != nil {
+			t.Fatalf("pair begin: %v", err)
+		}
+		err = client.PairSubmit(conn, "laptop", wrongCode(code))
+		if err == nil {
+			t.Fatal("a wrong code was accepted")
+		}
+		t.Logf("refused: %v", err)
+		if _, ok := h.store.Trusted(host.Fingerprint()); ok {
+			t.Fatal("a wrong code still stored the host key")
+		}
+		if len(h.store.List()) != 0 {
+			t.Fatal("a wrong code left an entry in the keystore")
+		}
+	})
+
+	t.Run("expired code is refused", func(t *testing.T) {
+		h := newHarness(t)
+		host := newHost(t)
+		// A window that is already over by the time the host arrives.
+		h.pair.SetTTL(time.Millisecond)
+		code := h.startPairing(t)
+		time.Sleep(20 * time.Millisecond)
+
+		conn, err := host.Dial(h.addr, "")
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		defer conn.Close()
+		if _, err := client.PairBegin(conn, "laptop"); err == nil {
+			t.Fatal("an expired window still accepted a key")
+		}
+		err = client.PairSubmit(conn, "laptop", code)
+		if err == nil {
+			t.Fatal("an expired code was accepted")
+		}
+		t.Logf("refused: %v", err)
+		if len(h.store.List()) != 0 {
+			t.Fatal("an expired code left an entry in the keystore")
+		}
+	})
+
+	t.Run("a code that worked once is refused the second time", func(t *testing.T) {
+		h := newHarness(t)
+		first := newHost(t)
+		second := newHost(t)
+		code := h.startPairing(t)
+
+		conn, err := first.Dial(h.addr, "")
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		if _, err := client.PairBegin(conn, "laptop"); err != nil {
+			t.Fatalf("pair begin: %v", err)
+		}
+		if err := client.PairSubmit(conn, "laptop", code); err != nil {
+			t.Fatalf("first pairing should succeed: %v", err)
+		}
+		conn.Close()
+
+		// A second machine that somehow learned the code gets nowhere.
+		conn2, err := second.Dial(h.addr, "")
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		defer conn2.Close()
+		if _, err := client.PairBegin(conn2, "second"); err == nil {
+			t.Fatal("a consumed window still accepted a key")
+		}
+		if err := client.PairSubmit(conn2, "second", code); err == nil {
+			t.Fatal("a consumed code was accepted a second time")
+		} else {
+			t.Logf("refused: %v", err)
+		}
+		if _, ok := h.store.Trusted(second.Fingerprint()); ok {
+			t.Fatal("the reused code paired a second host")
+		}
+		if len(h.store.List()) != 1 {
+			t.Fatalf("keystore holds %d hosts, want only the first", len(h.store.List()))
+		}
+	})
+
+	t.Run("rate limiting triggers over the wire", func(t *testing.T) {
+		h := newHarness(t)
+		host := newHost(t)
+		code := h.startPairing(t)
+
+		conn, err := host.Dial(h.addr, "")
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		defer conn.Close()
+		if _, err := client.PairBegin(conn, "laptop"); err != nil {
+			t.Fatalf("pair begin: %v", err)
+		}
+		if err := client.PairSubmit(conn, "laptop", wrongCode(code)); err == nil {
+			t.Fatal("a wrong code was accepted")
+		}
+		// The next attempt, right or wrong, is inside the backoff window.
+		err = client.PairSubmit(conn, "laptop", code)
+		if err == nil {
+			t.Fatal("the correct code was accepted during the lock window")
+		}
+		if !strings.Contains(err.Error(), "locked") {
+			t.Fatalf("expected a lockout, got: %v", err)
+		}
+		t.Logf("locked out: %v", err)
+		if len(h.store.List()) != 0 {
+			t.Fatal("a locked-out attempt left an entry in the keystore")
+		}
+	})
+}
+
+// TestPinnedDeviceKeyRejectsAnImpostor proves the host side of the pin: a
+// device answering on the right address with the wrong key is refused before a
+// single frame is exchanged.
+func TestPinnedDeviceKeyRejectsAnImpostor(t *testing.T) {
+	real := newHarness(t)
+	impostor := newHarness(t)
+	host := newHost(t)
+
+	code := real.startPairing(t)
+	conn, err := host.Dial(real.addr, "")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	deviceFP, err := client.PairBegin(conn, "laptop")
+	if err != nil {
+		t.Fatalf("pair begin: %v", err)
+	}
+	if err := client.PairSubmit(conn, "laptop", code); err != nil {
+		t.Fatalf("pair submit: %v", err)
+	}
+	conn.Close()
+
+	if _, err := host.Dial(impostor.addr, deviceFP); err == nil {
+		t.Fatal("a device presenting a different key was accepted")
+	} else {
+		t.Logf("refused: %v", err)
+	}
+}
+
+// TestRevocationEndsAccess proves trust can actually be taken back.
+func TestRevocationEndsAccess(t *testing.T) {
+	h := newHarness(t)
+	host := newHost(t)
+	code := h.startPairing(t)
+
+	conn, err := host.Dial(h.addr, "")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	if _, err := client.PairBegin(conn, "laptop"); err != nil {
+		t.Fatalf("pair begin: %v", err)
+	}
+	if err := client.PairSubmit(conn, "laptop", code); err != nil {
+		t.Fatalf("pair submit: %v", err)
+	}
+	conn.Close()
+
+	body := strings.NewReader(`{"label":"laptop"}`)
+	rec := h.control(t, http.MethodPost, "/hosts/revoke", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("revoke returned %d: %s", rec.Code, rec.Body.String())
+	}
+
+	conn2, err := host.Dial(h.addr, h.srv.Fingerprint())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn2.Close()
+	if err := client.Hello(conn2); err == nil {
+		t.Fatal("a revoked host was still accepted")
+	} else {
+		t.Logf("revoked host refused: %v", err)
+	}
+}
+
+// TestUnknownRequestIsRefused covers the unparsable and unexpected input rule.
+func TestUnknownRequestIsRefused(t *testing.T) {
+	h := newHarness(t)
+	host := newHost(t)
+	conn, err := host.Dial(h.addr, "")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if err := conn.WriteRequest(protocol.Request{Op: "flash-everything"}); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := conn.ReadResponse()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.OK {
+		t.Fatal("an unknown request was accepted")
+	}
+	t.Logf("refused: %s", resp.Error)
+}
+
+func wrongCode(code string) string {
+	if code == "000000" {
+		return "111111"
+	}
+	return "000000"
+}
