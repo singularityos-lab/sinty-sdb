@@ -60,16 +60,24 @@ func (s *Server) ControlHandler() http.Handler {
 	//   "pending_fingerprint_display","pending_label","attempts","locked_until"}
 	mux.HandleFunc("GET /pairing/state", func(w http.ResponseWriter, r *http.Request) {
 		st := s.pair.State()
-		writeJSON(w, http.StatusOK, map[string]any{
+		body := map[string]any{
 			"active":                      st.Active,
 			"code":                        st.Code,
-			"expires_at":                  st.ExpiresAt,
 			"pending_fingerprint":         st.PendingFingerprint,
 			"pending_fingerprint_display": keys.Display(st.PendingFingerprint),
 			"pending_label":               st.PendingLabel,
 			"attempts":                    st.Attempts,
-			"locked_until":                st.LockedUntil,
-		})
+		}
+		// A zero time must be absent rather than sent as a year-1 stamp: a strict
+		// reader would take that for a real deadline. The omitzero tags on the
+		// struct do not apply here because the body is built as a map.
+		if !st.ExpiresAt.IsZero() {
+			body["expires_at"] = st.ExpiresAt
+		}
+		if !st.LockedUntil.IsZero() {
+			body["locked_until"] = st.LockedUntil
+		}
+		writeJSON(w, http.StatusOK, body)
 	})
 
 	// POST /pairing/cancel returns {"ok"}
