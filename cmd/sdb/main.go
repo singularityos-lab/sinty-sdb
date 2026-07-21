@@ -24,9 +24,14 @@ func main() { os.Exit(run(os.Args[1:])) }
 const usage = `sdb is the Sinty Debug Bridge client.
 
 usage:
-  sdb pair <address>      pair this machine with a device
-  sdb devices             list the devices this machine is paired with
-  sdb revoke <label>      remove a paired host from a device's keyring
+  sdb pair <address>            pair this machine with a device
+  sdb devices                   list the devices this machine is paired with
+  sdb revoke <label>            remove a paired host from a device's keyring
+  sdb shell [--root] [cmd...]   run a shell or command on the device
+  sdb push <local> <remote>     copy a file to the device
+  sdb pull <remote> <local>     copy a file from the device
+  sdb logs [unit]               stream the device's logs
+  sdb forward <local> <device>  tunnel a local address to a device address
 `
 
 func run(args []string) int {
@@ -41,6 +46,16 @@ func run(args []string) int {
 		return cmdDevices(args[1:])
 	case "revoke":
 		return cmdRevoke(args[1:])
+	case "shell":
+		return cmdShell(args[1:])
+	case "push":
+		return cmdPush(args[1:])
+	case "pull":
+		return cmdPull(args[1:])
+	case "logs":
+		return cmdLogs(args[1:])
+	case "forward":
+		return cmdForward(args[1:])
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return 0
