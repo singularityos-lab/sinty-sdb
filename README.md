@@ -47,12 +47,20 @@ sdb pull <remote> <local>       copy a file from the device
 sdb logs [unit]                 stream a unit's captured logs
 sdb forward <local> <device>    tunnel a local address to a device address
 sdb forward -R <bind> <target>  reverse: the device binds and tunnels to the host
+sdb assist                      run a read-only diagnostic session in memory
 ```
 
-A shell runs as an unprivileged bridge user by default. A root shell, a write
-outside that user's home, and binding a low port are each granted only after the
-device's owner confirms the action on the device screen, one confirmation per
-action. A refusal, or no owner present, leaves the request unprivileged.
+A shell runs at one of three tiers. By default it is the logged-in user, since a
+paired host is the owner's own machine on the owner's own device; with no one
+logged in it falls back to an isolated bridge account. `--root` is a root shell,
+allowed only on a device the owner has deliberately unlocked and only after a
+per-action confirmation, and it fails closed to a non-root shell otherwise. A
+write outside the user's home and binding a low port are likewise confirmed per
+action. `sdb assist` is the assistance tier: a bounded, non-root session for
+remote support that needs no rooting. Its diagnostic tool is embedded in the
+signed daemon, run from an anonymous in-memory file for the session only, and
+executed as the isolated bridge account, so it reads diagnostics without the
+owner's data, without root, and without leaving a privileged binary on the disk.
 
 ## Security model
 
@@ -66,10 +74,16 @@ action. A refusal, or no owner present, leaves the request unprivileged.
   key is refused. There is no first-connection grace.
 - Pairing is rate limited with progressive backoff. An absent or damaged keystore
   trusts nobody.
-- The daemon runs commands as a dedicated unprivileged user with no access to the
-  owner's encrypted home or to the display seat. Every privileged action is
-  mediated per action by the system's own broker, which asks the owner to confirm
-  on the device; the daemon grants nothing on its own and fails closed.
+- The daemon drops privilege for every shell. Root is never the default and never
+  reachable without the owner both unlocking the device and confirming the action;
+  the isolated bridge account, used for assistance and as the no-login fallback,
+  carries no privileged groups and cannot read the owner's encrypted home or reach
+  the display seat. Every privileged action is mediated per action by the system's
+  own broker, which asks the owner to confirm on the device; the daemon grants
+  nothing on its own and fails closed.
+- Assistance tools are embedded in the signed daemon and executed from an
+  anonymous, sealed in-memory file, never written to disk, so a privileged helper
+  exists as an attack surface only while an authorized session holds it in memory.
 - Paths in file transfer are confined and never follow a symlink out of their
   root, and every transfer is verified against a hash at its destination.
 
