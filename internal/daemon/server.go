@@ -25,13 +25,26 @@ import (
 	"sync"
 	"time"
 
+	"github.com/singularityos-lab/sinty-sdb/internal/broker"
 	"github.com/singularityos-lab/sinty-sdb/internal/keys"
 	"github.com/singularityos-lab/sinty-sdb/internal/keystore"
 	"github.com/singularityos-lab/sinty-sdb/internal/logs"
 	"github.com/singularityos-lab/sinty-sdb/internal/pairing"
 	"github.com/singularityos-lab/sinty-sdb/internal/protocol"
 	"github.com/singularityos-lab/sinty-sdb/internal/session"
+	"github.com/singularityos-lab/sinty-sdb/internal/shell"
 	"github.com/singularityos-lab/sinty-sdb/internal/transfer"
+)
+
+// The bridge user: a dedicated unprivileged system account with no privileged
+// groups, so a non-root bridge session is isolated from the owner's encrypted
+// home and from the seat and GPU. Root is reachable only through the broker.
+const (
+	bridgeUID = 103
+	bridgeGID = 103
+	// brokerSocket is the ush broker's private socket. A wrong or absent path
+	// denies every elevation, which is the safe failure.
+	brokerSocket = "/run/ush/sdb-broker.sock"
 )
 
 // Config configures a Server.
@@ -183,7 +196,14 @@ func (s *Server) handle(raw net.Conn) {
 			_ = c.WriteResponse(protocol.Response{OK: true, Fingerprint: s.id.Fingerprint()})
 			s.log.Info("sdb phase-two session opened", "peer", keys.Display(c.Peer))
 			root := sessionRoot()
-			session.Serve(c.Upgrade(), session.Config{Root: root, Logs: sessionLogs(root)})
+			session.Serve(c.Upgrade(), session.Config{
+				Root:      root,
+				Logs:      sessionLogs(root),
+				Elevation: shell.Elevation{BridgeUID: bridgeUID, BridgeGID: bridgeGID},
+				Broker:    broker.New(brokerSocket),
+				Origin:    "sdb:" + host.Label,
+				SessionID: keys.Display(c.Peer),
+			})
 			return
 		}
 		resp := s.dispatch(c.Peer, trusted, req)

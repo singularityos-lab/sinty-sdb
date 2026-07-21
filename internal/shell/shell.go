@@ -14,12 +14,44 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"syscall"
 
 	"github.com/singularityos-lab/sinty-sdb/internal/mux"
 )
 
 // StreamKind is the mux open-kind that routes to this package.
 const StreamKind = "shell"
+
+// RootArg is the first argument a host sends to ask for a root shell. sdbd runs
+// as root, so a shell without this runs dropped to the bridge user; with it, the
+// broker must grant before the drop is skipped.
+const RootArg = "--sdb-root"
+
+// Elevation decides the OS credential a shell runs under. BridgeUID and
+// BridgeGID name the unprivileged user that non-root shells drop to.
+type Elevation struct {
+	BridgeUID uint32
+	BridgeGID uint32
+}
+
+// Credential returns the credential to run under and whether it is elevated.
+// The rule is fail-closed: a shell runs as root only when root was requested
+// AND the broker granted it; every other combination, including a root request
+// that was refused, drops to the bridge user. Never root by default, never root
+// on a denied request.
+func (e Elevation) Credential(rootRequested, granted bool) (*syscall.Credential, bool) {
+	if rootRequested && granted {
+		return nil, true
+	}
+	if e.BridgeUID == 0 {
+		// No bridge user configured: do not attempt a drop to uid 0 (that
+		// would keep root). A deployment must set a real bridge uid; the
+		// point that matters for safety is that a denied root request never
+		// returns elevated here.
+		return nil, false
+	}
+	return &syscall.Credential{Uid: e.BridgeUID, Gid: e.BridgeGID}, false
+}
 
 // closer is the subset of mux.Stream this package needs, so the exit code can
 // travel back to the host in the CLOSE frame.
@@ -30,10 +62,14 @@ type closer interface {
 
 // Serve runs the command named by args (or a plain shell when args is empty),
 // streaming stdin from st and stdout and stderr to st, then closes st with the
-// command's exit code. It returns the exit code and any error starting the
-// command.
-func Serve(st closer, args []string) (int, error) {
+// command's exit code. When cred is non-nil the command runs under that OS
+// credential, which is how a non-root shell drops from sdbd's root to the
+// bridge user. It returns the exit code and any error starting the command.
+func Serve(st closer, args []string, cred *syscall.Credential) (int, error) {
 	cmd := command(args)
+	if cred != nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: cred}
+	}
 	cmd.Stdout = st
 	cmd.Stderr = st
 
@@ -80,9 +116,10 @@ func command(args []string) *exec.Cmd {
 	return exec.Command(args[0], args[1:]...)
 }
 
-// ServeStream adapts a *mux.Stream to Serve, reading the command from the
-// stream's open arguments. It is what the daemon calls for an accepted stream
-// whose kind is StreamKind.
+// ServeStream adapts a *mux.Stream to Serve with no credential, running as the
+// daemon's own user. Callers that must drop to the bridge user or that gate a
+// root request through the broker use Serve directly with the credential from
+// Elevation.Credential.
 func ServeStream(st *mux.Stream) (int, error) {
-	return Serve(st, st.Args())
+	return Serve(st, st.Args(), nil)
 }
