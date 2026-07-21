@@ -25,6 +25,7 @@ const (
 	ActionShellRoot          = "shell-root"
 	ActionWriteSystem        = "write-system"
 	ActionBindPrivilegedPort = "bind-privileged-port"
+	ActionAssist             = "assist"
 )
 
 // CallTimeout bounds a single elevation exchange. It leaves room for a human to

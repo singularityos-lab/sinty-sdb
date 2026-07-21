@@ -236,3 +236,32 @@ func forwardReverse(sess *mux.Session, deviceBind, hostTarget string) int {
 		}
 	}
 }
+
+// assistKind is the mux open-kind for the assistance tier. It is duplicated as a
+// literal here rather than imported from internal/assist so the host CLI stays
+// free of that package's embedded device probe and its arch build tag.
+const assistKind = "assist"
+
+func cmdAssist(args []string) int {
+	fs := flag.NewFlagSet("sdb assist", flag.ContinueOnError)
+	dir := fs.String("config-dir", "", "override the configuration directory")
+	addr := fs.String("addr", "", "device to act on (needed when several are paired)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	sess, done, err := dialDevice(*dir, *addr)
+	if err != nil {
+		return fail(err)
+	}
+	defer done()
+
+	st, err := sess.Open(assistKind)
+	if err != nil {
+		return fail(err)
+	}
+	_, _ = io.Copy(os.Stdout, st)
+	if code, ok := st.ExitCode(); ok {
+		return code
+	}
+	return 0
+}

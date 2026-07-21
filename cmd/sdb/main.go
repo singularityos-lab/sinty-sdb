@@ -31,6 +31,7 @@ usage:
   sdb push <local> <remote>     copy a file to the device
   sdb pull <remote> <local>     copy a file from the device
   sdb logs [unit]               stream the device's logs
+  sdb assist                    run a read-only diagnostic assist session
   sdb forward <local> <device>  tunnel a local address to a device address
 `
 
@@ -56,6 +57,8 @@ func run(args []string) int {
 		return cmdLogs(args[1:])
 	case "forward":
 		return cmdForward(args[1:])
+	case "assist":
+		return cmdAssist(args[1:])
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return 0

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/singularityos-lab/sinty-sdb/internal/assist"
 	"github.com/singularityos-lab/sinty-sdb/internal/broker"
 	"github.com/singularityos-lab/sinty-sdb/internal/forward"
 	"github.com/singularityos-lab/sinty-sdb/internal/logs"
@@ -91,6 +92,42 @@ func TestSessionShellRefusedWithoutBridgeUser(t *testing.T) {
 	}
 	if code, ok := st.ExitCode(); !ok || code != 126 {
 		t.Fatalf("shell without a bridge user closed (%d,%v), want (126,true)", code, ok)
+	}
+}
+
+func TestSessionAssistRefusedWhenDenied(t *testing.T) {
+	c1, c2 := net.Pipe()
+	client := mux.NewSession(c1, false)
+	t.Cleanup(func() { client.Close() })
+	// Broker denies: the assistance tier must be refused, never run.
+	go session.Serve(c2, session.Config{
+		Broker: broker.New(mockBroker(t, false)),
+		Access: shell.Access{Bridge: shell.Identity{UID: 990, GID: 990}},
+	})
+	st, err := client.Open(assist.StreamKind)
+	if err != nil {
+		t.Fatalf("open assist: %v", err)
+	}
+	_, _ = io.ReadAll(st)
+	if code, ok := st.ExitCode(); !ok || code != 126 {
+		t.Fatalf("denied assist closed (%d,%v), want (126,true)", code, ok)
+	}
+}
+
+func TestSessionAssistRefusedWithoutBridge(t *testing.T) {
+	c1, c2 := net.Pipe()
+	client := mux.NewSession(c1, false)
+	t.Cleanup(func() { client.Close() })
+	// Broker grants, but there is no isolated bridge account to run the
+	// assistant as, so it must still be refused rather than run as root.
+	go session.Serve(c2, session.Config{Broker: broker.New(mockBroker(t, true))})
+	st, err := client.Open(assist.StreamKind)
+	if err != nil {
+		t.Fatalf("open assist: %v", err)
+	}
+	_, _ = io.ReadAll(st)
+	if code, ok := st.ExitCode(); !ok || code != 126 {
+		t.Fatalf("assist without a bridge closed (%d,%v), want (126,true)", code, ok)
 	}
 }
 

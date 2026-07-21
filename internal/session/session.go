@@ -12,7 +12,9 @@ package session
 import (
 	"io"
 	"path/filepath"
+	"syscall"
 
+	"github.com/singularityos-lab/sinty-sdb/internal/assist"
 	"github.com/singularityos-lab/sinty-sdb/internal/broker"
 	"github.com/singularityos-lab/sinty-sdb/internal/forward"
 	"github.com/singularityos-lab/sinty-sdb/internal/logs"
@@ -62,9 +64,28 @@ func dispatch(s *mux.Session, st *mux.Stream, cfg Config) {
 		_ = rforward.Listen(s, st, bindGate(st, cfg))
 	case logs.StreamKind:
 		_ = logs.Serve(st, cfg.Logs)
+	case assist.StreamKind:
+		serveAssist(st, cfg)
 	default:
 		_ = st.CloseWithCode(2)
 	}
+}
+
+// serveAssist runs the assistance tier: the broker must grant it per action
+// (bounded, never root), and it runs as the isolated bridge account so the
+// remote assistant never gets the owner's identity. Fail-closed: no broker, a
+// refusal, or no isolated account all refuse.
+func serveAssist(st *mux.Stream, cfg Config) {
+	granted := false
+	if cfg.Broker != nil {
+		granted, _ = cfg.Broker.Elevate(broker.ActionAssist, "", cfg.Origin, cfg.SessionID)
+	}
+	if !granted || cfg.Access.Bridge.UID == 0 {
+		_ = st.CloseWithCode(126)
+		return
+	}
+	cred := &syscall.Credential{Uid: cfg.Access.Bridge.UID, Gid: cfg.Access.Bridge.GID}
+	_ = assist.Serve(st, cred)
 }
 
 // bindGate returns the privileged-port check for a reverse listener: the broker
