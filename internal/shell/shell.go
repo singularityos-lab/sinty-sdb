@@ -27,30 +27,42 @@ const StreamKind = "shell"
 // broker must grant before the drop is skipped.
 const RootArg = "--sdb-root"
 
-// Elevation decides the OS credential a shell runs under. BridgeUID and
-// BridgeGID name the unprivileged user that non-root shells drop to.
-type Elevation struct {
-	BridgeUID uint32
-	BridgeGID uint32
+// Identity is an OS account to run a shell under. A zero UID means "not
+// resolved" and is never used to drop (that would leave the shell as root).
+type Identity struct {
+	UID uint32
+	GID uint32
 }
 
-// Credential returns the credential to run under and whether it is elevated.
-// The rule is fail-closed: a shell runs as root only when root was requested
-// AND the broker granted it; every other combination, including a root request
-// that was refused, drops to the bridge user. Never root by default, never root
-// on a denied request.
-func (e Elevation) Credential(rootRequested, granted bool) (*syscall.Credential, bool) {
-	if rootRequested && granted {
-		return nil, true
+// Access carries the identities a shell can run at: the logged-in user (the
+// default) and the isolated bridge account (the fallback when no one is logged
+// in, and the identity used for remote assistance). Whether root is allowed at
+// all is enforced by the broker, which denies the root grant on a locked
+// (not-rooted) device before ever prompting; sdbd holds no lock-state logic.
+type Access struct {
+	Login  Identity // the logged-in user (tier 1, default)
+	Bridge Identity // isolated unprivileged account (fallback and assistance)
+}
+
+// Resolve decides which credential a shell runs under. rootRequested is whether
+// the host asked for --root; rootGranted is whether the broker allowed it (the
+// broker having already refused it on a non-rooted device). The rules are
+// fail-closed:
+//   - root (nil credential) only with a broker grant;
+//   - otherwise the logged-in user;
+//   - otherwise the isolated bridge account;
+//   - otherwise refuse (ok=false), never silently run as the daemon's root.
+func (a Access) Resolve(rootRequested, rootGranted bool) (cred *syscall.Credential, tier string, ok bool) {
+	if rootRequested && rootGranted {
+		return nil, "root", true
 	}
-	if e.BridgeUID == 0 {
-		// No bridge user configured: do not attempt a drop to uid 0 (that
-		// would keep root). A deployment must set a real bridge uid; the
-		// point that matters for safety is that a denied root request never
-		// returns elevated here.
-		return nil, false
+	if a.Login.UID != 0 {
+		return &syscall.Credential{Uid: a.Login.UID, Gid: a.Login.GID}, "user", true
 	}
-	return &syscall.Credential{Uid: e.BridgeUID, Gid: e.BridgeGID}, false
+	if a.Bridge.UID != 0 {
+		return &syscall.Credential{Uid: a.Bridge.UID, Gid: a.Bridge.GID}, "bridge", true
+	}
+	return nil, "", false
 }
 
 // closer is the subset of mux.Stream this package needs, so the exit code can

@@ -54,21 +54,60 @@ const bridgeUser = "sdb"
 // when no active session runtime dir carries a broker socket.
 const fallbackBrokerUID = 1000
 
-// resolveBridge looks up the bridge account and returns its credential. If the
-// account is missing or resolves to uid 0, the returned Elevation has uid 0,
-// which serveShell treats as "no isolated user available" and refuses to run a
-// non-root shell rather than leaving it as root. Fail closed.
-func resolveBridge() shell.Elevation {
-	u, err := user.Lookup(bridgeUser)
+// resolveBridge looks up the isolated bridge account by name. A missing account
+// resolves to the zero identity, which the tier rules treat as "no bridge" and,
+// combined with no logged-in user, refuse the shell rather than leave it as root.
+func resolveBridge() shell.Identity {
+	return lookupIdentity(bridgeUser)
+}
+
+// resolveLoginUser finds the logged-in user a default shell drops to: the
+// regular user (uid >= 1000) with an active runtime dir, highest uid winning on
+// the rare multi-user box. A single-user Sinty resolves to its one user. If no
+// one is logged in it returns the zero identity, so the shell falls back to the
+// isolated bridge account.
+func resolveLoginUser() shell.Identity {
+	best := shell.Identity{}
+	entries, err := os.ReadDir("/run/user")
 	if err != nil {
-		return shell.Elevation{}
+		return best
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		uid, err := strconv.Atoi(e.Name())
+		if err != nil || uid < 1000 {
+			continue
+		}
+		u, err := user.LookupId(e.Name())
+		if err != nil {
+			continue
+		}
+		gid, err := strconv.Atoi(u.Gid)
+		if err != nil {
+			continue
+		}
+		if uint32(uid) > best.UID {
+			best = shell.Identity{UID: uint32(uid), GID: uint32(gid)}
+		}
+	}
+	return best
+}
+
+// lookupIdentity resolves a system account name to its uid/gid, or the zero
+// identity if it is absent or maps to uid 0.
+func lookupIdentity(name string) shell.Identity {
+	u, err := user.Lookup(name)
+	if err != nil {
+		return shell.Identity{}
 	}
 	uid, err1 := strconv.Atoi(u.Uid)
 	gid, err2 := strconv.Atoi(u.Gid)
 	if err1 != nil || err2 != nil || uid <= 0 {
-		return shell.Elevation{}
+		return shell.Identity{}
 	}
-	return shell.Elevation{BridgeUID: uint32(uid), BridgeGID: uint32(gid)}
+	return shell.Identity{UID: uint32(uid), GID: uint32(gid)}
 }
 
 // resolveBrokerSocket finds the ush broker's socket. The broker runs in the
@@ -246,7 +285,7 @@ func (s *Server) handle(raw net.Conn) {
 			session.Serve(c.Upgrade(), session.Config{
 				Root:      root,
 				Logs:      sessionLogs(root),
-				Elevation: resolveBridge(),
+				Access:    shell.Access{Login: resolveLoginUser(), Bridge: resolveBridge()},
 				Broker:    broker.New(resolveBrokerSocket()),
 				Origin:    "sdb:" + host.Label,
 				SessionID: keys.Display(c.Peer),

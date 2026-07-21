@@ -29,7 +29,7 @@ import (
 type Config struct {
 	Root      string
 	Logs      logs.Source
-	Elevation shell.Elevation
+	Access    shell.Access
 	Broker    *broker.Client
 	Origin    string
 	SessionID string
@@ -117,14 +117,16 @@ func serveShell(st *mux.Stream, cfg Config) {
 	if rootRequested {
 		args = args[1:]
 	}
+	// The broker decides root: it refuses on a locked (not-rooted) device before
+	// any prompt, and only grants after a human confirms on an unlocked one.
 	granted := false
 	if rootRequested && cfg.Broker != nil {
 		granted, _ = cfg.Broker.Elevate(broker.ActionShellRoot, "", cfg.Origin, cfg.SessionID)
 	}
-	cred, elevated := cfg.Elevation.Credential(rootRequested, granted)
-	if !elevated && cred == nil {
-		// No isolated bridge user was resolved, so there is nothing safe to
-		// drop to. Refuse rather than run the shell as the daemon's root.
+	cred, _, ok := cfg.Access.Resolve(rootRequested, granted)
+	if !ok {
+		// No logged-in user and no bridge account: nothing safe to drop to.
+		// Refuse rather than run the shell as the daemon's root.
 		_ = st.CloseWithCode(126)
 		return
 	}

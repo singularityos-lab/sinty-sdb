@@ -5,47 +5,49 @@ package shell
 
 import "testing"
 
-// The one invariant that must never break: a shell is elevated only when root
-// was requested AND granted. Every other case, above all a root request that
-// was refused, must come back not elevated.
-func TestCredentialFailsClosed(t *testing.T) {
-	e := Elevation{BridgeUID: 103, BridgeGID: 103}
+// The tiers, and the one invariant that must never break: a shell is root only
+// when root was requested AND the broker granted it. Every other case falls to
+// the logged-in user, then the isolated bridge, then refusal, never the daemon's
+// own root.
+func TestAccessResolveTiers(t *testing.T) {
+	login := Identity{UID: 1000, GID: 1000}
+	bridge := Identity{UID: 990, GID: 990}
+	full := Access{Login: login, Bridge: bridge}
+
 	cases := []struct {
-		rootRequested bool
-		granted       bool
-		wantElevated  bool
+		name        string
+		access      Access
+		rootReq     bool
+		rootGranted bool
+		wantTier    string
+		wantUID     uint32 // 0 means nil credential (kept root)
+		wantOK      bool
 	}{
-		{false, false, false},
-		{false, true, false}, // grant with no request must not elevate
-		{true, false, false}, // refused root must not elevate (fail-closed)
-		{true, true, true},   // requested and granted
+		{"default drops to login", full, false, false, "user", 1000, true},
+		{"grant without request stays user", full, false, true, "user", 1000, true},
+		{"refused root falls to user, not root", full, true, false, "user", 1000, true},
+		{"requested and granted is root", full, true, true, "root", 0, true},
+		{"no login falls to bridge", Access{Bridge: bridge}, false, false, "bridge", 990, true},
+		{"refused root with no login falls to bridge", Access{Bridge: bridge}, true, false, "bridge", 990, true},
+		{"nothing to drop to is refused", Access{}, false, false, "", 0, false},
+		{"refused root with nothing is refused, not root", Access{}, true, false, "", 0, false},
 	}
 	for _, c := range cases {
-		cred, elevated := e.Credential(c.rootRequested, c.granted)
-		if elevated != c.wantElevated {
-			t.Fatalf("Credential(root=%v,granted=%v) elevated=%v, want %v",
-				c.rootRequested, c.granted, elevated, c.wantElevated)
+		cred, tier, ok := c.access.Resolve(c.rootReq, c.rootGranted)
+		if ok != c.wantOK {
+			t.Fatalf("%s: ok=%v, want %v", c.name, ok, c.wantOK)
 		}
-		if elevated && cred != nil {
-			t.Fatalf("elevated shell must keep root (nil credential), got %+v", cred)
+		if tier != c.wantTier {
+			t.Fatalf("%s: tier=%q, want %q", c.name, tier, c.wantTier)
 		}
-		if !elevated && cred == nil {
-			t.Fatalf("non-elevated shell must drop to the bridge user, got nil credential")
+		if c.wantUID == 0 {
+			if ok && cred != nil {
+				t.Fatalf("%s: want nil credential (root/refuse), got %+v", c.name, cred)
+			}
+		} else {
+			if cred == nil || cred.Uid != c.wantUID {
+				t.Fatalf("%s: credential %+v, want uid %d", c.name, cred, c.wantUID)
+			}
 		}
-		if !elevated && cred.Uid != 103 {
-			t.Fatalf("non-elevated shell dropped to uid %d, want 103", cred.Uid)
-		}
-	}
-}
-
-// With no bridge user configured a non-elevated shell must not attempt a drop
-// to uid 0, which would silently keep root.
-func TestCredentialNoBridgeDoesNotKeepRootByDropping(t *testing.T) {
-	cred, elevated := Elevation{}.Credential(true, false)
-	if elevated {
-		t.Fatal("refused root must not elevate")
-	}
-	if cred != nil && cred.Uid == 0 {
-		t.Fatal("must not drop to uid 0 when no bridge user is configured")
 	}
 }
