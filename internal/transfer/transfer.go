@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/singularityos-lab/sinty-sdb/internal/mux"
 )
@@ -148,6 +149,46 @@ func ServePull(st *mux.Stream, root string) error {
 		return err
 	}
 	if err := writeHashed(st, data); err != nil {
+		return err
+	}
+	return st.CloseWithCode(0)
+}
+
+// ServePushSystem writes hashed content to an absolute system path that the
+// broker has already approved. It is the privileged counterpart of ServePush:
+// the caller must have obtained a broker grant for exactly this path first. Two
+// guards keep the write on the approved target: the final component is opened
+// with O_NOFOLLOW so a symlink cannot redirect it, and a symlinked parent
+// directory (which could point the whole path elsewhere than the human
+// approved) is refused.
+func ServePushSystem(st *mux.Stream, absPath string) error {
+	if !filepath.IsAbs(absPath) {
+		_ = st.CloseWithCode(2)
+		return ErrOutsideRoot
+	}
+	clean := filepath.Clean(absPath)
+	parent := filepath.Dir(clean)
+	if resolved, err := filepath.EvalSymlinks(parent); err == nil && resolved != parent {
+		_ = st.CloseWithCode(2)
+		return ErrOutsideRoot
+	}
+	data, err := readHashed(st)
+	if err != nil {
+		_ = st.CloseWithCode(1)
+		return err
+	}
+	f, err := os.OpenFile(clean, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0644)
+	if err != nil {
+		_ = st.CloseWithCode(3)
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		_ = st.CloseWithCode(3)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = st.CloseWithCode(3)
 		return err
 	}
 	return st.CloseWithCode(0)

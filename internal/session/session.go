@@ -11,6 +11,7 @@ package session
 
 import (
 	"io"
+	"path/filepath"
 
 	"github.com/singularityos-lab/sinty-sdb/internal/broker"
 	"github.com/singularityos-lab/sinty-sdb/internal/forward"
@@ -51,7 +52,7 @@ func dispatch(st *mux.Stream, cfg Config) {
 	case shell.StreamKind:
 		serveShell(st, cfg)
 	case transfer.KindPush:
-		_ = transfer.ServePush(st, cfg.Root)
+		servePush(st, cfg)
 	case transfer.KindPull:
 		_ = transfer.ServePull(st, cfg.Root)
 	case forward.KindForward:
@@ -61,6 +62,33 @@ func dispatch(st *mux.Stream, cfg Config) {
 	default:
 		_ = st.CloseWithCode(2)
 	}
+}
+
+// servePush routes a push. A relative path is a direct write confined to the
+// bridge user's home. An absolute path targets the system and is written only if
+// the broker grants write-system for exactly that path; otherwise it is refused.
+// Fail-closed: no broker, a refusal, or any error means no system write.
+func servePush(st *mux.Stream, cfg Config) {
+	args := st.Args()
+	if len(args) < 1 {
+		_ = st.CloseWithCode(2)
+		return
+	}
+	remote := args[0]
+	if !filepath.IsAbs(remote) {
+		_ = transfer.ServePush(st, cfg.Root)
+		return
+	}
+	clean := filepath.Clean(remote)
+	granted := false
+	if cfg.Broker != nil {
+		granted, _ = cfg.Broker.Elevate(broker.ActionWriteSystem, clean, cfg.Origin, cfg.SessionID)
+	}
+	if !granted {
+		_ = st.CloseWithCode(2)
+		return
+	}
+	_ = transfer.ServePushSystem(st, clean)
 }
 
 // serveShell decides the credential a shell runs under. A leading RootArg is a

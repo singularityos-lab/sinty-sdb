@@ -4,6 +4,7 @@
 package session_test
 
 import (
+	"bufio"
 	"bytes"
 	"io"
 	"net"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/singularityos-lab/sinty-sdb/internal/broker"
 	"github.com/singularityos-lab/sinty-sdb/internal/forward"
 	"github.com/singularityos-lab/sinty-sdb/internal/logs"
 	"github.com/singularityos-lab/sinty-sdb/internal/mux"
@@ -19,6 +21,78 @@ import (
 	"github.com/singularityos-lab/sinty-sdb/internal/shell"
 	"github.com/singularityos-lab/sinty-sdb/internal/transfer"
 )
+
+// mockBroker answers every elevation request with grant.
+func mockBroker(t *testing.T, grant bool) string {
+	t.Helper()
+	sock := filepath.Join(t.TempDir(), "broker.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				_, _ = bufio.NewReader(c).ReadBytes('\n')
+				resp := `{"ok":false,"message":"denied"}`
+				if grant {
+					resp = `{"ok":true}`
+				}
+				_, _ = c.Write([]byte(resp + "\n"))
+			}(conn)
+		}
+	}()
+	return sock
+}
+
+func pushWithBroker(t *testing.T, grant bool) (target string, err error) {
+	t.Helper()
+	root := t.TempDir()
+	c1, c2 := net.Pipe()
+	client := mux.NewSession(c1, false)
+	t.Cleanup(func() { client.Close() })
+	go session.Serve(c2, session.Config{
+		Root:      root,
+		Broker:    broker.New(mockBroker(t, grant)),
+		Origin:    "sdb:test",
+		SessionID: "sess",
+	})
+	target = filepath.Join(t.TempDir(), "under", "system.conf")
+	if e := os.MkdirAll(filepath.Dir(target), 0755); e != nil {
+		t.Fatal(e)
+	}
+	local := filepath.Join(t.TempDir(), "src")
+	if e := os.WriteFile(local, []byte("system payload"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	return target, transfer.Push(client, local, target)
+}
+
+func TestSessionWriteSystemGrantedWrites(t *testing.T) {
+	target, err := pushWithBroker(t, true)
+	if err != nil {
+		t.Fatalf("granted system push failed: %v", err)
+	}
+	if got, _ := os.ReadFile(target); string(got) != "system payload" {
+		t.Fatalf("target got %q, want %q", got, "system payload")
+	}
+}
+
+func TestSessionWriteSystemDeniedRefused(t *testing.T) {
+	target, err := pushWithBroker(t, false)
+	if err == nil {
+		t.Fatal("denied system push should fail")
+	}
+	if _, err := os.Stat(target); err == nil {
+		t.Fatal("a denied system write landed a file")
+	}
+}
 
 // One connection, one dispatch: every phase-two command must reach its handler
 // through session.Serve, or it is orphaned code that compiles but never runs.

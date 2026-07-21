@@ -5,6 +5,7 @@ package transfer
 
 import (
 	"bytes"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -117,6 +118,84 @@ func TestPushPullRoundTrip(t *testing.T) {
 	}
 	if !bytes.Equal(got, content) {
 		t.Fatalf("pulled got %q, want %q", got, content)
+	}
+}
+
+// systemPush runs ServePushSystem(target) on the device side and returns the
+// client's opened stream after writing hashed content and closing it.
+func systemPush(t *testing.T, target string, content []byte) *mux.Stream {
+	t.Helper()
+	c1, c2 := net.Pipe()
+	client := mux.NewSession(c1, false)
+	server := mux.NewSession(c2, true)
+	t.Cleanup(func() { client.Close(); server.Close() })
+	go func() {
+		st, err := server.Accept()
+		if err != nil {
+			return
+		}
+		_ = ServePushSystem(st, target)
+	}()
+	st, err := client.Open(KindPush, target)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := writeHashed(st, content); err != nil {
+		t.Fatalf("writeHashed: %v", err)
+	}
+	_ = st.Close()
+	_, _ = io.ReadAll(st)
+	return st
+}
+
+func TestServePushSystemWrites(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "sub", "sys.conf")
+	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("an approved system write")
+	st := systemPush(t, target, content)
+	if code, ok := st.ExitCode(); !ok || code != 0 {
+		t.Fatalf("exit (%d,%v), want (0,true)", code, ok)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil || !bytes.Equal(got, content) {
+		t.Fatalf("target got %q err %v, want %q", got, err, content)
+	}
+}
+
+func TestServePushSystemRefusesSymlinkedParent(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real")
+	if err := os.Mkdir(real, 0755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	target := filepath.Join(link, "f")
+	st := systemPush(t, target, []byte("x"))
+	if code, _ := st.ExitCode(); code != 2 {
+		t.Fatalf("symlinked parent exit code %d, want 2", code)
+	}
+	if _, err := os.Stat(filepath.Join(real, "f")); err == nil {
+		t.Fatal("write landed through a symlinked parent")
+	}
+}
+
+func TestServePushSystemRefusesSymlinkTarget(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "flink")
+	if err := os.Symlink(filepath.Join(dir, "elsewhere"), target); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	st := systemPush(t, target, []byte("x"))
+	if code, _ := st.ExitCode(); code != 3 {
+		t.Fatalf("symlink target exit code %d, want 3", code)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "elsewhere")); err == nil {
+		t.Fatal("write followed a symlink target")
 	}
 }
 
