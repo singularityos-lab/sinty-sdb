@@ -14,6 +14,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -22,7 +23,9 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -302,20 +305,28 @@ func sessionRoot() string {
 	return "/var/lib/sinty-sdb"
 }
 
-// sessionLogs streams a log file confined to the bridge user's home. Reading
-// system logs, which requires no unit name, is a privileged action left to the
-// broker rather than served here; the real per-unit sinit registry is wired in
-// separately.
+// sessionLogs resolves a log request. A path-like name reads a file confined to
+// the bridge user's home; a bare unit name reads sinit's captured logs through
+// atomctl, which sdbd (running as root) is authorized to do. The connection is
+// already pairing-gated, which is the trust boundary for reading a paired host's
+// device logs.
 func sessionLogs(root string) logs.Source {
 	return func(unit string) (io.ReadCloser, error) {
 		if unit == "" {
-			return nil, errors.New("system log streaming requires broker mediation")
+			return nil, errors.New("naming a unit or a log path is required")
 		}
-		p, err := transfer.ConfinePath(root, unit)
+		if strings.ContainsRune(unit, '/') {
+			p, err := transfer.ConfinePath(root, unit)
+			if err != nil {
+				return nil, err
+			}
+			return os.Open(p)
+		}
+		out, err := exec.Command("/usr/bin/atomctl", "logs", unit).Output()
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("read unit logs: %w", err)
 		}
-		return os.Open(p)
+		return io.NopCloser(bytes.NewReader(out)), nil
 	}
 }
 
