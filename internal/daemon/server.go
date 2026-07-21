@@ -24,7 +24,9 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -40,16 +42,34 @@ import (
 	"github.com/singularityos-lab/sinty-sdb/internal/transfer"
 )
 
-// The bridge user: a dedicated unprivileged system account with no privileged
-// groups, so a non-root bridge session is isolated from the owner's encrypted
-// home and from the seat and GPU. Root is reachable only through the broker.
-const (
-	bridgeUID = 103
-	bridgeGID = 103
-	// fallbackBrokerUID is the primary user on a single-user Sinty install,
-	// used only when no active session runtime dir carries a broker socket.
-	fallbackBrokerUID = 1000
-)
+// bridgeUser is the dedicated unprivileged account a non-root bridge shell drops
+// to: no privileged groups, so it is isolated from the owner's encrypted home and
+// from the seat and GPU. It is resolved by NAME, never by a hardcoded uid: a
+// fixed number silently collides with another system account (uid 103 is tss and
+// gid 103 is pipewire on the base image), which would drop the shell to the wrong
+// identity. Root is reachable only through the broker.
+const bridgeUser = "sdb"
+
+// fallbackBrokerUID is the primary user on a single-user Sinty install, used only
+// when no active session runtime dir carries a broker socket.
+const fallbackBrokerUID = 1000
+
+// resolveBridge looks up the bridge account and returns its credential. If the
+// account is missing or resolves to uid 0, the returned Elevation has uid 0,
+// which serveShell treats as "no isolated user available" and refuses to run a
+// non-root shell rather than leaving it as root. Fail closed.
+func resolveBridge() shell.Elevation {
+	u, err := user.Lookup(bridgeUser)
+	if err != nil {
+		return shell.Elevation{}
+	}
+	uid, err1 := strconv.Atoi(u.Uid)
+	gid, err2 := strconv.Atoi(u.Gid)
+	if err1 != nil || err2 != nil || uid <= 0 {
+		return shell.Elevation{}
+	}
+	return shell.Elevation{BridgeUID: uint32(uid), BridgeGID: uint32(gid)}
+}
 
 // resolveBrokerSocket finds the ush broker's socket. The broker runs in the
 // graphical user's session, so the socket lives under that user's runtime dir.
@@ -226,7 +246,7 @@ func (s *Server) handle(raw net.Conn) {
 			session.Serve(c.Upgrade(), session.Config{
 				Root:      root,
 				Logs:      sessionLogs(root),
-				Elevation: shell.Elevation{BridgeUID: bridgeUID, BridgeGID: bridgeGID},
+				Elevation: resolveBridge(),
 				Broker:    broker.New(resolveBrokerSocket()),
 				Origin:    "sdb:" + host.Label,
 				SessionID: keys.Display(c.Peer),

@@ -74,6 +74,26 @@ func pushWithBroker(t *testing.T, grant bool) (target string, err error) {
 	return target, transfer.Push(client, local, target)
 }
 
+func TestSessionShellRefusedWithoutBridgeUser(t *testing.T) {
+	c1, c2 := net.Pipe()
+	client := mux.NewSession(c1, false)
+	t.Cleanup(func() { client.Close() })
+	// No Elevation (no bridge user resolved) and no Broker: a non-root shell has
+	// nothing safe to drop to, so it must be refused, never run as root.
+	go session.Serve(c2, session.Config{Root: t.TempDir()})
+
+	st, err := client.Open(shell.StreamKind, "id")
+	if err != nil {
+		t.Fatalf("open shell: %v", err)
+	}
+	if _, err := io.ReadAll(st); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if code, ok := st.ExitCode(); !ok || code != 126 {
+		t.Fatalf("shell without a bridge user closed (%d,%v), want (126,true)", code, ok)
+	}
+}
+
 func TestSessionWriteSystemGrantedWrites(t *testing.T) {
 	target, err := pushWithBroker(t, true)
 	if err != nil {
@@ -104,10 +124,17 @@ func TestSessionDispatchesEveryKind(t *testing.T) {
 	logSrc := func(unit string) (io.ReadCloser, error) {
 		return io.NopCloser(strings.NewReader("log for " + unit)), nil
 	}
-	go session.Serve(c2, session.Config{Root: root, Logs: logSrc})
+	// A granting broker so the shell takes the elevated path (nil credential, no
+	// setuid), which is the only shell path a non-root test process can run: a
+	// real drop calls setgroups, which needs root and only works on the device.
+	go session.Serve(c2, session.Config{
+		Root:   root,
+		Logs:   logSrc,
+		Broker: broker.New(mockBroker(t, true)),
+	})
 
-	// shell
-	sh, err := client.Open(shell.StreamKind, "echo", "wired")
+	// shell (root path so it runs without a real setuid drop; see harness note)
+	sh, err := client.Open(shell.StreamKind, shell.RootArg, "echo", "wired")
 	if err != nil {
 		t.Fatalf("open shell: %v", err)
 	}

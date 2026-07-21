@@ -121,6 +121,12 @@ func serveShell(st *mux.Stream, cfg Config) {
 	if rootRequested && cfg.Broker != nil {
 		granted, _ = cfg.Broker.Elevate(broker.ActionShellRoot, "", cfg.Origin, cfg.SessionID)
 	}
-	cred, _ := cfg.Elevation.Credential(rootRequested, granted)
+	cred, elevated := cfg.Elevation.Credential(rootRequested, granted)
+	if !elevated && cred == nil {
+		// No isolated bridge user was resolved, so there is nothing safe to
+		// drop to. Refuse rather than run the shell as the daemon's root.
+		_ = st.CloseWithCode(126)
+		return
+	}
 	_, _ = shell.Serve(st, args, cred)
 }
