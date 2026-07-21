@@ -18,6 +18,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -26,9 +27,11 @@ import (
 
 	"github.com/singularityos-lab/sinty-sdb/internal/keys"
 	"github.com/singularityos-lab/sinty-sdb/internal/keystore"
+	"github.com/singularityos-lab/sinty-sdb/internal/logs"
 	"github.com/singularityos-lab/sinty-sdb/internal/pairing"
 	"github.com/singularityos-lab/sinty-sdb/internal/protocol"
 	"github.com/singularityos-lab/sinty-sdb/internal/session"
+	"github.com/singularityos-lab/sinty-sdb/internal/transfer"
 )
 
 // Config configures a Server.
@@ -179,7 +182,8 @@ func (s *Server) handle(raw net.Conn) {
 			}
 			_ = c.WriteResponse(protocol.Response{OK: true, Fingerprint: s.id.Fingerprint()})
 			s.log.Info("sdb phase-two session opened", "peer", keys.Display(c.Peer))
-			session.Serve(c.Upgrade(), sessionRoot())
+			root := sessionRoot()
+			session.Serve(c.Upgrade(), session.Config{Root: root, Logs: sessionLogs(root)})
 			return
 		}
 		resp := s.dispatch(c.Peer, trusted, req)
@@ -252,6 +256,23 @@ func sessionRoot() string {
 		return home
 	}
 	return "/var/lib/sinty-sdb"
+}
+
+// sessionLogs streams a log file confined to the bridge user's home. Reading
+// system logs, which requires no unit name, is a privileged action left to the
+// broker rather than served here; the real per-unit sinit registry is wired in
+// separately.
+func sessionLogs(root string) logs.Source {
+	return func(unit string) (io.ReadCloser, error) {
+		if unit == "" {
+			return nil, errors.New("system log streaming requires broker mediation")
+		}
+		p, err := transfer.ConfinePath(root, unit)
+		if err != nil {
+			return nil, err
+		}
+		return os.Open(p)
+	}
 }
 
 // labelFor keeps a label usable even if the host sent none.

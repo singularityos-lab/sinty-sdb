@@ -9,9 +9,11 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/singularityos-lab/sinty-sdb/internal/forward"
+	"github.com/singularityos-lab/sinty-sdb/internal/logs"
 	"github.com/singularityos-lab/sinty-sdb/internal/mux"
 	"github.com/singularityos-lab/sinty-sdb/internal/session"
 	"github.com/singularityos-lab/sinty-sdb/internal/shell"
@@ -25,7 +27,10 @@ func TestSessionDispatchesEveryKind(t *testing.T) {
 	c1, c2 := net.Pipe()
 	client := mux.NewSession(c1, false)
 	t.Cleanup(func() { client.Close() })
-	go session.Serve(c2, root)
+	logSrc := func(unit string) (io.ReadCloser, error) {
+		return io.NopCloser(strings.NewReader("log for " + unit)), nil
+	}
+	go session.Serve(c2, session.Config{Root: root, Logs: logSrc})
 
 	// shell
 	sh, err := client.Open(shell.StreamKind, "echo", "wired")
@@ -86,4 +91,14 @@ func TestSessionDispatchesEveryKind(t *testing.T) {
 		t.Fatalf("forward got %q, want %q", buf, "echo")
 	}
 	_ = fw.Close()
+
+	// logs
+	lg, err := client.Open(logs.StreamKind, "sdbd")
+	if err != nil {
+		t.Fatalf("open logs: %v", err)
+	}
+	logOut, _ := io.ReadAll(lg)
+	if string(logOut) != "log for sdbd" {
+		t.Fatalf("logs got %q, want %q", logOut, "log for sdbd")
+	}
 }
