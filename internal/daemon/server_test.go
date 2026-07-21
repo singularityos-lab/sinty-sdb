@@ -488,3 +488,66 @@ func TestShutdownDropsLiveConnections(t *testing.T) {
 		t.Fatalf("daemon still tracks %d session(s) after shutdown", remaining)
 	}
 }
+
+// TestPhaseTwoSessionUpgrade proves the OpSession handoff end to end over real
+// TLS: a paired host upgrades the control connection to a mux session and the
+// device's dispatch receives its streams. An unknown stream kind is used so the
+// path is proven without dropping privileges or touching the filesystem: the
+// device must close it with the unknown-kind code, which only happens if the
+// upgrade and dispatch both ran.
+func TestPhaseTwoSessionUpgrade(t *testing.T) {
+	h := newHarness(t)
+	host := newHost(t)
+	code := h.startPairing(t)
+
+	conn, err := host.Dial(h.addr, "")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	deviceFP, err := client.PairBegin(conn, "laptop")
+	if err != nil {
+		t.Fatalf("pair begin: %v", err)
+	}
+	if err := client.PairSubmit(conn, "laptop", code); err != nil {
+		t.Fatalf("pair submit: %v", err)
+	}
+	conn.Close()
+
+	conn2, err := host.Dial(h.addr, deviceFP)
+	if err != nil {
+		t.Fatalf("second dial: %v", err)
+	}
+	defer conn2.Close()
+
+	sess, err := client.OpenSession(conn2)
+	if err != nil {
+		t.Fatalf("a paired host should be able to open a phase-two session: %v", err)
+	}
+	st, err := sess.Open("no-such-kind")
+	if err != nil {
+		t.Fatalf("open stream: %v", err)
+	}
+	if _, err := io.ReadAll(st); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if code, ok := st.ExitCode(); !ok || code != 2 {
+		t.Fatalf("unknown kind closed with (%d,%v), want (2,true); dispatch not reached", code, ok)
+	}
+	t.Log("paired host upgraded to a mux session and the device dispatched its stream")
+}
+
+// TestPhaseTwoSessionRefusedForUnpaired proves an unpaired host cannot open a
+// session: the upgrade request is refused before any stream can be opened.
+func TestPhaseTwoSessionRefusedForUnpaired(t *testing.T) {
+	h := newHarness(t)
+	stranger := newHost(t)
+
+	conn, err := stranger.Dial(h.addr, "")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if _, err := client.OpenSession(conn); err == nil {
+		t.Fatal("an unpaired host must not open a phase-two session")
+	}
+}
