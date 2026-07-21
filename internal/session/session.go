@@ -17,6 +17,7 @@ import (
 	"github.com/singularityos-lab/sinty-sdb/internal/forward"
 	"github.com/singularityos-lab/sinty-sdb/internal/logs"
 	"github.com/singularityos-lab/sinty-sdb/internal/mux"
+	"github.com/singularityos-lab/sinty-sdb/internal/rforward"
 	"github.com/singularityos-lab/sinty-sdb/internal/shell"
 	"github.com/singularityos-lab/sinty-sdb/internal/transfer"
 )
@@ -43,11 +44,11 @@ func Serve(conn io.ReadWriteCloser, cfg Config) {
 		if err != nil {
 			return
 		}
-		go dispatch(st, cfg)
+		go dispatch(s, st, cfg)
 	}
 }
 
-func dispatch(st *mux.Stream, cfg Config) {
+func dispatch(s *mux.Session, st *mux.Stream, cfg Config) {
 	switch st.Kind() {
 	case shell.StreamKind:
 		serveShell(st, cfg)
@@ -57,10 +58,25 @@ func dispatch(st *mux.Stream, cfg Config) {
 		_ = transfer.ServePull(st, cfg.Root)
 	case forward.KindForward:
 		_ = forward.ServeForward(st)
+	case rforward.KindListen:
+		_ = rforward.Listen(s, st, bindGate(st, cfg))
 	case logs.StreamKind:
 		_ = logs.Serve(st, cfg.Logs)
 	default:
 		_ = st.CloseWithCode(2)
+	}
+}
+
+// bindGate returns the privileged-port check for a reverse listener: the broker
+// must grant bind-privileged-port for the requested bind address. No broker
+// means no privileged bind.
+func bindGate(st *mux.Stream, cfg Config) func() bool {
+	return func() bool {
+		if cfg.Broker == nil || len(st.Args()) < 1 {
+			return false
+		}
+		ok, _ := cfg.Broker.Elevate(broker.ActionBindPrivilegedPort, st.Args()[0], cfg.Origin, cfg.SessionID)
+		return ok
 	}
 }
 

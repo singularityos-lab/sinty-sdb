@@ -16,6 +16,7 @@ import (
 	"github.com/singularityos-lab/sinty-sdb/internal/keys"
 	"github.com/singularityos-lab/sinty-sdb/internal/logs"
 	"github.com/singularityos-lab/sinty-sdb/internal/mux"
+	"github.com/singularityos-lab/sinty-sdb/internal/rforward"
 	"github.com/singularityos-lab/sinty-sdb/internal/shell"
 	"github.com/singularityos-lab/sinty-sdb/internal/transfer"
 )
@@ -164,19 +165,28 @@ func cmdForward(args []string) int {
 	fs := flag.NewFlagSet("sdb forward", flag.ContinueOnError)
 	dir := fs.String("config-dir", "", "override the configuration directory")
 	addr := fs.String("addr", "", "device to act on (needed when several are paired)")
+	reverse := fs.Bool("R", false, "reverse: the device binds and tunnels to a host address")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if fs.NArg() != 2 {
-		fmt.Fprintln(os.Stderr, "sdb forward: <local-addr> <device-addr>")
+		if *reverse {
+			fmt.Fprintln(os.Stderr, "sdb forward -R: <device-bind-addr> <host-target>")
+		} else {
+			fmt.Fprintln(os.Stderr, "sdb forward: <local-addr> <device-addr>")
+		}
 		return 2
 	}
-	local, remote := fs.Arg(0), fs.Arg(1)
 	sess, done, err := dialDevice(*dir, *addr)
 	if err != nil {
 		return fail(err)
 	}
 	defer done()
+
+	if *reverse {
+		return forwardReverse(sess, fs.Arg(0), fs.Arg(1))
+	}
+	local, remote := fs.Arg(0), fs.Arg(1)
 
 	ln, err := net.Listen("tcp", local)
 	if err != nil {
@@ -201,5 +211,28 @@ func cmdForward(args []string) int {
 			<-done
 			_ = st.Close()
 		}(conn)
+	}
+}
+
+// forwardReverse asks the device to bind deviceBind and tunnel every connection
+// to hostTarget, which this host dials. It runs until interrupted.
+func forwardReverse(sess *mux.Session, deviceBind, hostTarget string) int {
+	ctrl, err := sess.Open(rforward.KindListen, deviceBind, hostTarget)
+	if err != nil {
+		return fail(err)
+	}
+	bound, err := rforward.ReadBoundAddr(ctrl)
+	if err != nil {
+		return fail(err)
+	}
+	fmt.Printf("Device listening on %s -> %s (Ctrl-C to stop)\n", bound, hostTarget)
+	for {
+		st, err := sess.Accept()
+		if err != nil {
+			return 0
+		}
+		if st.Kind() == rforward.KindConn {
+			go rforward.HandleConn(st)
+		}
 	}
 }
