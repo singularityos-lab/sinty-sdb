@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -42,10 +43,33 @@ import (
 const (
 	bridgeUID = 103
 	bridgeGID = 103
-	// brokerSocket is the ush broker's private socket. A wrong or absent path
-	// denies every elevation, which is the safe failure.
-	brokerSocket = "/run/ush/sdb-broker.sock"
+	// fallbackBrokerUID is the primary user on a single-user Sinty install,
+	// used only when no active session runtime dir carries a broker socket.
+	fallbackBrokerUID = 1000
 )
+
+// resolveBrokerSocket finds the ush broker's socket. The broker runs in the
+// graphical user's session, so the socket lives under that user's runtime dir.
+// sdbd runs as root and cannot assume a uid, so it honours an explicit override,
+// then looks for a live broker socket under /run/user/<uid>, and falls back to
+// the single-user primary. A wrong path denies every elevation, which is safe.
+func resolveBrokerSocket() string {
+	if s := os.Getenv("USH_BROKER_SOCK"); s != "" {
+		return s
+	}
+	if entries, err := os.ReadDir("/run/user"); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			p := filepath.Join("/run/user", e.Name(), "ush", "broker.sock")
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		}
+	}
+	return fmt.Sprintf("/run/user/%d/ush/broker.sock", fallbackBrokerUID)
+}
 
 // Config configures a Server.
 type Config struct {
@@ -200,7 +224,7 @@ func (s *Server) handle(raw net.Conn) {
 				Root:      root,
 				Logs:      sessionLogs(root),
 				Elevation: shell.Elevation{BridgeUID: bridgeUID, BridgeGID: bridgeGID},
-				Broker:    broker.New(brokerSocket),
+				Broker:    broker.New(resolveBrokerSocket()),
 				Origin:    "sdb:" + host.Label,
 				SessionID: keys.Display(c.Peer),
 			})
