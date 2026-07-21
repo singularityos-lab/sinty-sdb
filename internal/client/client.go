@@ -15,6 +15,7 @@ import (
 
 	"github.com/singularityos-lab/sinty-sdb/internal/keys"
 	"github.com/singularityos-lab/sinty-sdb/internal/keystore"
+	"github.com/singularityos-lab/sinty-sdb/internal/mux"
 	"github.com/singularityos-lab/sinty-sdb/internal/protocol"
 )
 
@@ -94,6 +95,16 @@ func PairSubmit(conn *protocol.Conn, label, code string) error {
 func Hello(conn *protocol.Conn) error {
 	_, err := call(conn, protocol.Request{Op: protocol.OpHello}, protocol.CallTimeout)
 	return err
+}
+
+// OpenSession upgrades a paired connection to a phase-two mux session for
+// shell, file transfer and tunnelling. After it returns, conn belongs to the
+// session and must not be used for control requests.
+func OpenSession(conn *protocol.Conn) (*mux.Session, error) {
+	if _, err := call(conn, protocol.Request{Op: protocol.OpSession}, protocol.CallTimeout); err != nil {
+		return nil, err
+	}
+	return mux.NewSession(conn.Upgrade(), false), nil
 }
 
 // ListHosts returns the devices's paired hosts.

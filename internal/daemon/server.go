@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -27,6 +28,7 @@ import (
 	"github.com/singularityos-lab/sinty-sdb/internal/keystore"
 	"github.com/singularityos-lab/sinty-sdb/internal/pairing"
 	"github.com/singularityos-lab/sinty-sdb/internal/protocol"
+	"github.com/singularityos-lab/sinty-sdb/internal/session"
 )
 
 // Config configures a Server.
@@ -170,6 +172,16 @@ func (s *Server) handle(raw net.Conn) {
 		if err != nil {
 			return
 		}
+		if req.Op == protocol.OpSession {
+			if !trusted {
+				_ = c.WriteResponse(refuse(errors.New("this host is not paired with the device")))
+				return
+			}
+			_ = c.WriteResponse(protocol.Response{OK: true, Fingerprint: s.id.Fingerprint()})
+			s.log.Info("sdb phase-two session opened", "peer", keys.Display(c.Peer))
+			session.Serve(c.Upgrade(), sessionRoot())
+			return
+		}
 		resp := s.dispatch(c.Peer, trusted, req)
 		if err := c.WriteResponse(resp); err != nil {
 			return
@@ -230,6 +242,16 @@ func (s *Server) dispatch(peer string, trusted bool, req protocol.Request) proto
 	default:
 		return refuse(fmt.Errorf("unknown request %q", req.Op))
 	}
+}
+
+// sessionRoot confines phase-two file transfers to the bridge user's home.
+// Writing outside it is a privileged action mediated by the broker, so the
+// confinement root is the home directory, never the filesystem root.
+func sessionRoot() string {
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return home
+	}
+	return "/var/lib/sinty-sdb"
 }
 
 // labelFor keeps a label usable even if the host sent none.

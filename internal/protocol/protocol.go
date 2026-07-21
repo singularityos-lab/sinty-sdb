@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"time"
 
@@ -38,6 +39,7 @@ const (
 	OpHello       = "hello"
 	OpHostsList   = "hosts-list"
 	OpHostsRevoke = "hosts-revoke"
+	OpSession     = "session"
 )
 
 // Deadlines bounding a connection. Pairing waits on a human typing a code, so
@@ -78,6 +80,24 @@ func NewConn(c net.Conn, peer string) *Conn {
 
 // Close closes the underlying connection.
 func (c *Conn) Close() error { return c.net.Close() }
+
+// Upgrade hands the connection to a byte-stream layer such as the phase-two
+// mux. It reads through the buffered reader so any bytes already pulled off the
+// socket during the control exchange are not lost, and writes and closes the
+// raw connection. Do not call ReadRequest or ReadResponse after Upgrade.
+func (c *Conn) Upgrade() io.ReadWriteCloser {
+	_ = c.net.SetDeadline(time.Time{})
+	return upgraded{r: c.r, c: c.net}
+}
+
+type upgraded struct {
+	r io.Reader
+	c net.Conn
+}
+
+func (u upgraded) Read(p []byte) (int, error)  { return u.r.Read(p) }
+func (u upgraded) Write(p []byte) (int, error) { return u.c.Write(p) }
+func (u upgraded) Close() error                { return u.c.Close() }
 
 // SetDeadline bounds the next exchange.
 func (c *Conn) SetDeadline(t time.Time) error { return c.net.SetDeadline(t) }
