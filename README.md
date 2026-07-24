@@ -17,16 +17,14 @@ stored key alone, with no code.
 
 ## Availability
 
-The bridge is a development-image feature and is off by default. `sdbd` refuses
-to start unless both markers are present:
+The bridge is off by default and never runs on its own. `sdbd` starts only when
+both switches are on:
 
-- `/etc/atom/dev.enabled`, the development image gate
-- `/var/lib/sinty-sdb/enabled`, the per-bridge opt-in
+- Developer options are enabled in Settings (marker `/etc/atom/dev.enabled`).
+- The bridge itself is switched on (marker `/var/lib/sinty-sdb/enabled`).
 
-The two are deliberately separate: turning the bridge off must not disable
-developer mode, and it must not disable the control that turns the bridge back
-on. An absent marker means off, so a fresh image carries no listener until it is
-asked for one.
+Turn either off and the daemon stops, so a device carries no network listener
+until the owner asks for one.
 
 ## Commands
 
@@ -78,9 +76,8 @@ owner's data, without root, and without leaving a privileged binary on the disk.
   reachable without the owner both unlocking the device and confirming the action;
   the isolated bridge account, used for assistance and as the no-login fallback,
   carries no privileged groups and cannot read the owner's encrypted home or reach
-  the display seat. Every privileged action is mediated per action by the system's
-  own broker, which asks the owner to confirm on the device; the daemon grants
-  nothing on its own and fails closed.
+  the display seat. Every privileged action is confirmed by the owner on the
+  device before it runs; the daemon grants nothing on its own and fails closed.
 - Assistance tools are embedded in the signed daemon and executed from an
   anonymous, sealed in-memory file, never written to disk, so a privileged helper
   exists as an attack surface only while an authorized session holds it in memory.
