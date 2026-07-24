@@ -156,6 +156,35 @@ func (m *Manager) Begin(fingerprint, label string) error {
 	return nil
 }
 
+// Open is the host-initiated pairing entry. Unlike Begin, which needs a window
+// already opened locally (via Start), Open opens one if none is live, generating
+// the code, and records the offered key in the same step, so `sdb pair` alone
+// brings the code up on the device (adb-style) with no prior local Start. An
+// already-open device-initiated window is reused so its code does not change.
+// The code is returned only to the daemon here, never over the wire to the host:
+// physical presence to read the on-screen code is still required to finish.
+func (m *Manager) Open(fingerprint, label string) (string, time.Time, error) {
+	if fingerprint == "" || label == "" {
+		return "", time.Time{}, ErrNoAttempt
+	}
+	code, err := generateCode()
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sweep()
+	if m.s == nil {
+		m.s = &session{code: code, expiresAt: m.now().Add(m.ttl)}
+	}
+	if locked, err := m.lockCheck(); locked {
+		return "", time.Time{}, err
+	}
+	m.s.fingerprint = fingerprint
+	m.s.label = label
+	return m.s.code, m.s.expiresAt, nil
+}
+
 // Submit checks a code offered by the host whose key is pending. On success the
 // session is consumed, so the same code cannot be presented twice.
 func (m *Manager) Submit(fingerprint, code string) error {

@@ -311,9 +311,17 @@ func (s *Server) dispatch(peer string, trusted bool, req protocol.Request) proto
 		if trusted {
 			return protocol.Response{OK: true, Fingerprint: s.id.Fingerprint()}
 		}
-		if err := s.pair.Begin(peer, req.Label); err != nil {
+		// Host-initiated: opening the window here (not requiring a prior local
+		// Start) is what makes `sdb pair` alone raise the code on the device. The
+		// code is logged for a headless device and surfaced to the local UI via
+		// /pairing/state; it is never returned to the host over the wire.
+		code, expires, err := s.pair.Open(peer, req.Label)
+		if err != nil {
 			return refuse(err)
 		}
+		s.log.Info("sdb pairing code (read it off the device screen)",
+			"code", code, "label", req.Label,
+			"fingerprint", keys.Display(peer), "expires", expires)
 		return protocol.Response{OK: true, Fingerprint: s.id.Fingerprint()}
 
 	case protocol.OpPairSubmit:

@@ -168,10 +168,6 @@ func TestUnknownKeyIsRefused(t *testing.T) {
 		{"hello", client.Hello},
 		{"list paired hosts", func(c *protocol.Conn) error { _, err := client.ListHosts(c); return err }},
 		{"revoke a host", func(c *protocol.Conn) error { return client.Revoke(c, "laptop") }},
-		{"pair without an open window", func(c *protocol.Conn) error {
-			_, err := client.PairBegin(c, "stranger")
-			return err
-		}},
 		{"submit a code without an open window", func(c *protocol.Conn) error {
 			return client.PairSubmit(c, "stranger", "000000")
 		}},
@@ -193,6 +189,27 @@ func TestUnknownKeyIsRefused(t *testing.T) {
 	if len(h.store.List()) != 0 {
 		t.Fatal("a refused host left an entry in the keystore")
 	}
+
+	// Host-initiated pairing: PairBegin now OPENS a window (the code shows on the
+	// device screen) instead of refusing, but opening a window is not pairing. No
+	// key is stored until a correct on-screen code is submitted, so triggering a
+	// window over the wire grants nothing by itself.
+	t.Run("host-initiated PairBegin opens a window but does not pair", func(t *testing.T) {
+		conn, err := stranger.Dial(h.addr, "")
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		defer conn.Close()
+		if _, err := client.PairBegin(conn, "stranger"); err != nil {
+			t.Fatalf("host-initiated PairBegin should open a window: %v", err)
+		}
+		if err := client.PairSubmit(conn, "stranger", "000000"); err == nil {
+			t.Fatal("a wrong code paired the host")
+		}
+		if len(h.store.List()) != 0 {
+			t.Fatal("opening a window without the correct code stored the host")
+		}
+	})
 }
 
 // TestPairingRefusalsOverTheWire proves the code rules hold through the real
@@ -237,8 +254,10 @@ func TestPairingRefusalsOverTheWire(t *testing.T) {
 			t.Fatalf("dial: %v", err)
 		}
 		defer conn.Close()
-		if _, err := client.PairBegin(conn, "laptop"); err == nil {
-			t.Fatal("an expired window still accepted a key")
+		// The expired window is gone; a host-initiated PairBegin opens a FRESH one
+		// with a new code shown on the device. The OLD (expired) code must not pair.
+		if _, err := client.PairBegin(conn, "laptop"); err != nil {
+			t.Fatalf("host-initiated PairBegin should open a fresh window: %v", err)
 		}
 		err = client.PairSubmit(conn, "laptop", code)
 		if err == nil {
@@ -274,8 +293,10 @@ func TestPairingRefusalsOverTheWire(t *testing.T) {
 			t.Fatalf("dial: %v", err)
 		}
 		defer conn2.Close()
-		if _, err := client.PairBegin(conn2, "second"); err == nil {
-			t.Fatal("a consumed window still accepted a key")
+		// host2's PairBegin opens a fresh window (new code on the device); host1's
+		// already-consumed code must not pair host2.
+		if _, err := client.PairBegin(conn2, "second"); err != nil {
+			t.Fatalf("host-initiated PairBegin should open a fresh window: %v", err)
 		}
 		if err := client.PairSubmit(conn2, "second", code); err == nil {
 			t.Fatal("a consumed code was accepted a second time")
