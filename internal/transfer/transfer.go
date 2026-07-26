@@ -7,7 +7,7 @@
 // a symlink, is refused, because a write that escapes the root is an attack, not
 // a convenience. Second, the receiver verifies a SHA-256 the sender prepends to
 // the content, so a truncated or altered transfer fails loudly instead of
-// landing a corrupt file. Writing outside the bridge user's own tree is a
+// landing a corrupt file. Writing outside the transfer root is a
 // privileged action mediated by the ush broker, exactly like every other
 // privileged path; this package carries the bytes and the checks, not the
 // privilege.

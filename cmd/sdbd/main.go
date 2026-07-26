@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/singularityos-lab/sinty-sdb/internal/daemon"
 	"github.com/singularityos-lab/sinty-sdb/internal/keys"
@@ -71,7 +72,21 @@ func run(args []string) int {
 		fmt.Fprintln(os.Stderr, "sdbd: refusing to serve with an unreadable keystore")
 		return 1
 	}
-	srv, err := daemon.New(daemon.Config{Identity: id, Store: store, Pairing: pairing.NewManager()})
+	root := filepath.Join(*stateDir, "files")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		fmt.Fprintln(os.Stderr, "sdbd:", err)
+		return 1
+	}
+	if err := os.Chmod(root, 0o700); err != nil {
+		fmt.Fprintln(os.Stderr, "sdbd:", err)
+		return 1
+	}
+	srv, err := daemon.New(daemon.Config{
+		Identity: id,
+		Store:    store,
+		Pairing:  pairing.NewManager(),
+		Root:     root,
+	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "sdbd:", err)
 		return 1
@@ -79,6 +94,7 @@ func run(args []string) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	go watchGates(ctx, stop, time.Second, *gate, *optIn)
 
 	fmt.Fprintf(os.Stderr, "sdbd: device key %s\n", keys.Display(id.Fingerprint()))
 
@@ -93,4 +109,32 @@ func run(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+func watchGates(ctx context.Context, stop context.CancelFunc, interval time.Duration, paths ...string) {
+	check := func() bool {
+		for _, path := range paths {
+			if _, err := os.Stat(path); err != nil {
+				stop()
+				return false
+			}
+		}
+		return true
+	}
+	if !check() {
+		return
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if !check() {
+				return
+			}
+		}
+	}
 }

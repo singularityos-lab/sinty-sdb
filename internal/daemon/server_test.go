@@ -20,6 +20,7 @@ import (
 	"github.com/singularityos-lab/sinty-sdb/internal/keystore"
 	"github.com/singularityos-lab/sinty-sdb/internal/pairing"
 	"github.com/singularityos-lab/sinty-sdb/internal/protocol"
+	"github.com/singularityos-lab/sinty-sdb/internal/transfer"
 )
 
 // harness is a live device daemon on a loopback port, plus the pieces a test
@@ -29,6 +30,7 @@ type harness struct {
 	addr  string
 	store *keystore.Store
 	pair  *pairing.Manager
+	root  string
 }
 
 func newHarness(t *testing.T) *harness {
@@ -43,10 +45,15 @@ func newHarness(t *testing.T) *harness {
 		t.Fatalf("keystore: %v", err)
 	}
 	pm := pairing.NewManager()
+	root := filepath.Join(dir, "files")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	srv, err := New(Config{
 		Identity: id,
 		Store:    store,
 		Pairing:  pm,
+		Root:     root,
 		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
@@ -59,7 +66,7 @@ func newHarness(t *testing.T) *harness {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go func() { _ = srv.Serve(ctx, ln) }()
-	return &harness{srv: srv, addr: ln.Addr().String(), store: store, pair: pm}
+	return &harness{srv: srv, addr: ln.Addr().String(), store: store, pair: pm, root: root}
 }
 
 // newHost builds a host identity in its own directory.
@@ -453,6 +460,7 @@ func TestShutdownDropsLiveConnections(t *testing.T) {
 		Identity: id,
 		Store:    store,
 		Pairing:  pairing.NewManager(),
+		Root:     filepath.Join(dir, "files"),
 		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
@@ -553,6 +561,25 @@ func TestPhaseTwoSessionUpgrade(t *testing.T) {
 	}
 	if code, ok := st.ExitCode(); !ok || code != 2 {
 		t.Fatalf("unknown kind closed with (%d,%v), want (2,true); dispatch not reached", code, ok)
+	}
+
+	out := filepath.Join(t.TempDir(), "device.key")
+	if err := transfer.Pull(sess, "device.key", out); err == nil {
+		t.Fatal("relative pull exposed the device identity")
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Fatalf("refused pull left output behind: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(h.root, "hello.txt"), []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out = filepath.Join(t.TempDir(), "hello.txt")
+	if err := transfer.Pull(sess, "hello.txt", out); err != nil {
+		t.Fatalf("pull from the transfer root: %v", err)
+	}
+	if got, err := os.ReadFile(out); err != nil || string(got) != "hello" {
+		t.Fatalf("pulled %q, %v", got, err)
 	}
 	t.Log("paired host upgraded to a mux session and the device dispatched its stream")
 }

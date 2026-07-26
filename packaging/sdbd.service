@@ -12,6 +12,8 @@ Wants=network.target
 
 [Service]
 Type=simple
+Group=singularity-session
+StateDirectory=sinty-sdb
 ExecStart=/usr/bin/sdbd
 Restart=on-failure
 RestartSec=2

@@ -102,7 +102,7 @@ func bindGate(st *mux.Stream, cfg Config) func() bool {
 }
 
 // servePush routes a push. A relative path is a direct write confined to the
-// bridge user's home. An absolute path targets the system and is written only if
+// transfer root. An absolute path targets the system and is written only if
 // the broker grants write-system for exactly that path; otherwise it is refused.
 // Fail-closed: no broker, a refusal, or any error means no system write.
 func servePush(st *mux.Stream, cfg Config) {

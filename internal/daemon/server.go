@@ -138,6 +138,7 @@ type Config struct {
 	Identity *keys.Identity
 	Store    *keystore.Store
 	Pairing  *pairing.Manager
+	Root     string
 	Log      *slog.Logger
 }
 
@@ -146,6 +147,7 @@ type Server struct {
 	id    *keys.Identity
 	store *keystore.Store
 	pair  *pairing.Manager
+	root  string
 	log   *slog.Logger
 
 	mu   sync.Mutex
@@ -164,6 +166,9 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Pairing == nil {
 		return nil, errors.New("sdbd: no pairing manager")
 	}
+	if !filepath.IsAbs(cfg.Root) {
+		return nil, errors.New("sdbd: session root must be absolute")
+	}
 	log := cfg.Log
 	if log == nil {
 		log = slog.Default()
@@ -172,6 +177,7 @@ func New(cfg Config) (*Server, error) {
 		id:    cfg.Identity,
 		store: cfg.Store,
 		pair:  cfg.Pairing,
+		root:  cfg.Root,
 		log:   log,
 		live:  make(map[net.Conn]struct{}),
 	}, nil
@@ -281,10 +287,9 @@ func (s *Server) handle(raw net.Conn) {
 			}
 			_ = c.WriteResponse(protocol.Response{OK: true, Fingerprint: s.id.Fingerprint()})
 			s.log.Info("sdb phase-two session opened", "peer", keys.Display(c.Peer))
-			root := sessionRoot()
 			session.Serve(c.Upgrade(), session.Config{
-				Root:      root,
-				Logs:      sessionLogs(root),
+				Root:      s.root,
+				Logs:      sessionLogs(s.root),
 				Access:    shell.Access{Login: resolveLoginUser(), Bridge: resolveBridge()},
 				Broker:    broker.New(resolveBrokerSocket()),
 				Origin:    "sdb:" + host.Label,
@@ -362,18 +367,8 @@ func (s *Server) dispatch(peer string, trusted bool, req protocol.Request) proto
 	}
 }
 
-// sessionRoot confines phase-two file transfers to the bridge user's home.
-// Writing outside it is a privileged action mediated by the broker, so the
-// confinement root is the home directory, never the filesystem root.
-func sessionRoot() string {
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		return home
-	}
-	return "/var/lib/sinty-sdb"
-}
-
 // sessionLogs resolves a log request. A path-like name reads a file confined to
-// the bridge user's home; a bare unit name reads sinit's captured logs through
+// the transfer root; a bare unit name reads sinit's captured logs through
 // atomctl, which sdbd (running as root) is authorized to do. The connection is
 // already pairing-gated, which is the trust boundary for reading a paired host's
 // device logs.

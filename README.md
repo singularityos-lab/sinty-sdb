@@ -53,8 +53,10 @@ paired host is the owner's own machine on the owner's own device; with no one
 logged in it falls back to an isolated bridge account. `--root` is a root shell,
 allowed only on a device the owner has deliberately unlocked and only after a
 per-action confirmation, and it fails closed to a non-root shell otherwise. A
-write outside the user's home and binding a low port are likewise confirmed per
-action. `sdb assist` is the assistance tier: a bounded, non-root session for
+write outside the transfer sandbox and binding a low port are likewise confirmed
+per action. Ordinary commands from a paired host do not ask again; the broker is
+used only for privileged actions. `sdb assist` is the assistance tier: a
+bounded, non-root session for
 remote support that needs no rooting. Its diagnostic tool is embedded in the
 signed daemon, run from an anonymous in-memory file for the session only, and
 executed as the isolated bridge account, so it reads diagnostics without the
@@ -81,8 +83,10 @@ owner's data, without root, and without leaving a privileged binary on the disk.
 - Assistance tools are embedded in the signed daemon and executed from an
   anonymous, sealed in-memory file, never written to disk, so a privileged helper
   exists as an attack surface only while an authorized session holds it in memory.
-- Paths in file transfer are confined and never follow a symlink out of their
-  root, and every transfer is verified against a hash at its destination.
+- Relative file transfers are confined to `/var/lib/sinty-sdb/files`, separate
+  from the device identity and paired-host keystore. Paths never follow a
+  symlink out of that root, and every transfer is verified against a hash at its
+  destination.
 
 ## Build
 
