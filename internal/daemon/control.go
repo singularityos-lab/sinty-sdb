@@ -111,7 +111,8 @@ func (s *Server) ControlHandler() http.Handler {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
-		if err := s.store.Remove(req.Label); err != nil {
+		host, err := s.store.RemoveHost(req.Label)
+		if err != nil {
 			code := http.StatusInternalServerError
 			if errors.Is(err, keystore.ErrNotFound) {
 				code = http.StatusNotFound
@@ -119,7 +120,8 @@ func (s *Server) ControlHandler() http.Handler {
 			writeJSON(w, code, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
-		s.log.Info("sdb host revoked", "label", req.Label)
+		dropped := s.dropPeer(host.Fingerprint)
+		s.log.Info("sdb host revoked", "label", req.Label, "closed_sessions", dropped)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
 

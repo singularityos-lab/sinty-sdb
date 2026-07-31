@@ -151,7 +151,7 @@ type Server struct {
 	log   *slog.Logger
 
 	mu   sync.Mutex
-	live map[net.Conn]struct{}
+	live map[net.Conn]string
 }
 
 // New builds a Server. Every dependency is required: a nil keystore would mean
@@ -179,7 +179,7 @@ func New(cfg Config) (*Server, error) {
 		pair:  cfg.Pairing,
 		root:  cfg.Root,
 		log:   log,
-		live:  make(map[net.Conn]struct{}),
+		live:  make(map[net.Conn]string),
 	}, nil
 }
 
@@ -187,13 +187,37 @@ func New(cfg Config) (*Server, error) {
 // function that unregisters it.
 func (s *Server) track(c net.Conn) func() {
 	s.mu.Lock()
-	s.live[c] = struct{}{}
+	s.live[c] = ""
 	s.mu.Unlock()
 	return func() {
 		s.mu.Lock()
 		delete(s.live, c)
 		s.mu.Unlock()
 	}
+}
+
+func (s *Server) identify(c net.Conn, fingerprint string) {
+	s.mu.Lock()
+	if _, ok := s.live[c]; ok {
+		s.live[c] = fingerprint
+	}
+	s.mu.Unlock()
+}
+
+func (s *Server) dropPeer(fingerprint string) int {
+	s.mu.Lock()
+	conns := make([]net.Conn, 0)
+	for conn, peer := range s.live {
+		if strings.EqualFold(peer, fingerprint) {
+			conns = append(conns, conn)
+			delete(s.live, conn)
+		}
+	}
+	s.mu.Unlock()
+	for _, conn := range conns {
+		_ = conn.Close()
+	}
+	return len(conns)
 }
 
 // dropLive closes every connection still open. Closing the listener alone only
@@ -205,7 +229,7 @@ func (s *Server) dropLive() int {
 	for c := range s.live {
 		conns = append(conns, c)
 	}
-	s.live = make(map[net.Conn]struct{})
+	s.live = make(map[net.Conn]string)
 	s.mu.Unlock()
 	for _, c := range conns {
 		_ = c.Close()
@@ -262,6 +286,7 @@ func (s *Server) handle(raw net.Conn) {
 	if peer == "" {
 		return
 	}
+	s.identify(raw, peer)
 
 	host, trusted := s.store.Trusted(peer)
 	if trusted {
@@ -297,9 +322,15 @@ func (s *Server) handle(raw net.Conn) {
 			})
 			return
 		}
-		resp := s.dispatch(c.Peer, trusted, req)
+		resp, revokedPeer := s.dispatch(c.Peer, trusted, req)
 		if err := c.WriteResponse(resp); err != nil {
 			return
+		}
+		if revokedPeer != "" {
+			s.dropPeer(revokedPeer)
+			if strings.EqualFold(revokedPeer, c.Peer) {
+				return
+			}
 		}
 		if req.Op == protocol.OpPairSubmit && resp.OK {
 			trusted = true
@@ -310,11 +341,11 @@ func (s *Server) handle(raw net.Conn) {
 // dispatch decides one request. An unpaired peer can do nothing except pair,
 // and only while a pairing window is open. There is no first-connection grace
 // and no fallback: an unknown key that is not pairing is refused.
-func (s *Server) dispatch(peer string, trusted bool, req protocol.Request) protocol.Response {
+func (s *Server) dispatch(peer string, trusted bool, req protocol.Request) (protocol.Response, string) {
 	switch req.Op {
 	case protocol.OpPairBegin:
 		if trusted {
-			return protocol.Response{OK: true, Fingerprint: s.id.Fingerprint()}
+			return protocol.Response{OK: true, Fingerprint: s.id.Fingerprint()}, ""
 		}
 		// Host-initiated: opening the window here (not requiring a prior local
 		// Start) is what makes `sdb pair` alone raise the code on the device. The
@@ -322,48 +353,55 @@ func (s *Server) dispatch(peer string, trusted bool, req protocol.Request) proto
 		// /pairing/state; it is never returned to the host over the wire.
 		code, expires, err := s.pair.Open(peer, req.Label)
 		if err != nil {
-			return refuse(err)
+			return refuse(err), ""
 		}
 		s.log.Info("sdb pairing code (read it off the device screen)",
 			"code", code, "label", req.Label,
 			"fingerprint", keys.Display(peer), "expires", expires)
-		return protocol.Response{OK: true, Fingerprint: s.id.Fingerprint()}
+		return protocol.Response{OK: true, Fingerprint: s.id.Fingerprint()}, ""
 
 	case protocol.OpPairSubmit:
 		if err := s.pair.Submit(peer, req.Code); err != nil {
-			return refuse(err)
+			return refuse(err), ""
 		}
 		label := s.labelFor(req.Label)
-		if err := s.store.Add(label, peer); err != nil {
-			return refuse(err)
+		displaced, err := s.store.AddHost(label, peer)
+		if err != nil {
+			return refuse(err), ""
+		}
+		for _, host := range displaced {
+			if !strings.EqualFold(host.Fingerprint, peer) {
+				s.dropPeer(host.Fingerprint)
+			}
 		}
 		s.log.Info("sdb host paired", "label", label, "fingerprint", keys.Display(peer))
-		return protocol.Response{OK: true, Fingerprint: s.id.Fingerprint()}
+		return protocol.Response{OK: true, Fingerprint: s.id.Fingerprint()}, ""
 
 	case protocol.OpHello:
 		if !trusted {
-			return refuse(errors.New("this host is not paired with the device"))
+			return refuse(errors.New("this host is not paired with the device")), ""
 		}
-		return protocol.Response{OK: true, Fingerprint: s.id.Fingerprint()}
+		return protocol.Response{OK: true, Fingerprint: s.id.Fingerprint()}, ""
 
 	case protocol.OpHostsList:
 		if !trusted {
-			return refuse(errors.New("this host is not paired with the device"))
+			return refuse(errors.New("this host is not paired with the device")), ""
 		}
-		return protocol.Response{OK: true, Hosts: s.store.List()}
+		return protocol.Response{OK: true, Hosts: s.store.List()}, ""
 
 	case protocol.OpHostsRevoke:
 		if !trusted {
-			return refuse(errors.New("this host is not paired with the device"))
+			return refuse(errors.New("this host is not paired with the device")), ""
 		}
-		if err := s.store.Remove(req.Label); err != nil {
-			return refuse(err)
+		host, err := s.store.RemoveHost(req.Label)
+		if err != nil {
+			return refuse(err), ""
 		}
 		s.log.Info("sdb host revoked", "label", req.Label)
-		return protocol.Response{OK: true}
+		return protocol.Response{OK: true}, host.Fingerprint
 
 	default:
-		return refuse(fmt.Errorf("unknown request %q", req.Op))
+		return refuse(fmt.Errorf("unknown request %q", req.Op)), ""
 	}
 }
 

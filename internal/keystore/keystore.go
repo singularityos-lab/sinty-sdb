@@ -118,45 +118,76 @@ func (s *Store) Trusted(fingerprint string) (Host, bool) {
 // re-pairing the same machine does not leave a stale key behind that would
 // still be accepted.
 func (s *Store) Add(label, fingerprint string) error {
+	_, err := s.AddHost(label, fingerprint)
+	return err
+}
+
+// AddHost records a newly paired host and returns entries displaced by its
+// label or fingerprint.
+func (s *Store) AddHost(label, fingerprint string) ([]Host, error) {
 	if label == "" {
-		return errors.New("add host: empty label")
+		return nil, errors.New("add host: empty label")
 	}
 	if fingerprint == "" {
-		return errors.New("add host: empty fingerprint")
+		return nil, errors.New("add host: empty fingerprint")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
 	next := make([]Host, 0, len(s.hosts)+1)
+	displaced := make([]Host, 0)
 	for _, h := range s.hosts {
 		if h.Label != label && !strings.EqualFold(h.Fingerprint, fingerprint) {
 			next = append(next, h)
+		} else {
+			displaced = append(displaced, h)
 		}
 	}
-	s.hosts = append(next, Host{
+	next = append(next, Host{
 		Label:       label,
 		Fingerprint: strings.ToLower(fingerprint),
 		PairedAt:    now,
 		LastUsed:    time.Time{},
 	})
-	return s.save()
+	previous := s.hosts
+	s.hosts = next
+	if err := s.save(); err != nil {
+		s.hosts = previous
+		return nil, err
+	}
+	return displaced, nil
 }
 
 // Remove revokes the host carrying the label.
 func (s *Store) Remove(label string) error {
+	_, err := s.RemoveHost(label)
+	return err
+}
+
+// RemoveHost revokes the host carrying the label and returns the removed key so
+// the daemon can terminate sessions authenticated with it.
+func (s *Store) RemoveHost(label string) (Host, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	next := make([]Host, 0, len(s.hosts))
+	removed := Host{}
 	for _, h := range s.hosts {
 		if h.Label != label {
 			next = append(next, h)
+		} else {
+			removed = h
 		}
 	}
 	if len(next) == len(s.hosts) {
-		return ErrNotFound
+		return Host{}, ErrNotFound
 	}
+	previous := s.hosts
 	s.hosts = next
-	return s.save()
+	if err := s.save(); err != nil {
+		s.hosts = previous
+		return Host{}, err
+	}
+	return removed, nil
 }
 
 // Touch stamps a fingerprint as used now, so the user can tell a live pairing
@@ -166,8 +197,13 @@ func (s *Store) Touch(fingerprint string) error {
 	defer s.mu.Unlock()
 	for i := range s.hosts {
 		if strings.EqualFold(s.hosts[i].Fingerprint, fingerprint) {
+			previous := s.hosts[i].LastUsed
 			s.hosts[i].LastUsed = s.now()
-			return s.save()
+			if err := s.save(); err != nil {
+				s.hosts[i].LastUsed = previous
+				return err
+			}
+			return nil
 		}
 	}
 	return ErrNotFound

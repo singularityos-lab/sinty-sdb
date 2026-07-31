@@ -396,10 +396,33 @@ func TestRevocationEndsAccess(t *testing.T) {
 	}
 	conn.Close()
 
+	liveConn, err := host.Dial(h.addr, h.srv.Fingerprint())
+	if err != nil {
+		t.Fatalf("live session dial: %v", err)
+	}
+	defer liveConn.Close()
+	liveSession, err := client.OpenSession(liveConn)
+	if err != nil {
+		t.Fatalf("open live session: %v", err)
+	}
+
 	body := strings.NewReader(`{"label":"laptop"}`)
 	rec := h.control(t, http.MethodPost, "/hosts/revoke", body)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("revoke returned %d: %s", rec.Code, rec.Body.String())
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		stream, openErr := liveSession.Open("no-such-kind")
+		if openErr != nil {
+			break
+		}
+		_ = stream.Close()
+		if time.Now().After(deadline) {
+			t.Fatal("a live session survived host revocation")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	conn2, err := host.Dial(h.addr, h.srv.Fingerprint())
@@ -411,6 +434,60 @@ func TestRevocationEndsAccess(t *testing.T) {
 		t.Fatal("a revoked host was still accepted")
 	} else {
 		t.Logf("revoked host refused: %v", err)
+	}
+}
+
+func TestRepairingLabelClosesDisplacedHost(t *testing.T) {
+	h := newHarness(t)
+	first := newHost(t)
+	second := newHost(t)
+
+	pair := func(host *client.Client, label string) {
+		t.Helper()
+		code := h.startPairing(t)
+		conn, err := host.Dial(h.addr, "")
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		defer conn.Close()
+		if _, err := client.PairBegin(conn, label); err != nil {
+			t.Fatalf("pair begin: %v", err)
+		}
+		if err := client.PairSubmit(conn, label, code); err != nil {
+			t.Fatalf("pair submit: %v", err)
+		}
+	}
+
+	pair(first, "laptop")
+	liveConn, err := first.Dial(h.addr, h.srv.Fingerprint())
+	if err != nil {
+		t.Fatalf("live session dial: %v", err)
+	}
+	defer liveConn.Close()
+	liveSession, err := client.OpenSession(liveConn)
+	if err != nil {
+		t.Fatalf("open live session: %v", err)
+	}
+
+	pair(second, "laptop")
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		stream, openErr := liveSession.Open("no-such-kind")
+		if openErr != nil {
+			break
+		}
+		_ = stream.Close()
+		if time.Now().After(deadline) {
+			t.Fatal("the displaced host kept its live session")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, ok := h.store.Trusted(first.Fingerprint()); ok {
+		t.Fatal("the displaced host remained trusted")
+	}
+	if _, ok := h.store.Trusted(second.Fingerprint()); !ok {
+		t.Fatal("the replacement host was not trusted")
 	}
 }
 

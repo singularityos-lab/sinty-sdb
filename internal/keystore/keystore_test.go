@@ -168,6 +168,49 @@ func TestRepairingReplacesTheOldEntry(t *testing.T) {
 	}
 }
 
+func TestFailedAddDoesNotChangeTrust(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blocked", "keystore.json")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Dir(path), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Add("laptop", fpA); err == nil {
+		t.Fatal("add succeeded with an unusable keystore path")
+	}
+	if _, ok := s.Trusted(fpA); ok {
+		t.Fatal("a failed add changed in-memory trust")
+	}
+}
+
+func TestFailedRemoveDoesNotChangeTrust(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	path := filepath.Join(stateDir, "keystore.json")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Add("laptop", fpA); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(stateDir, stateDir+"-saved"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stateDir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RemoveHost("laptop"); err == nil {
+		t.Fatal("remove succeeded with an unusable keystore path")
+	}
+	if _, ok := s.Trusted(fpA); !ok {
+		t.Fatal("a failed remove changed in-memory trust")
+	}
+}
+
 func TestAddRejectsEmptyFields(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "keystore.json"))
 	if err != nil {
