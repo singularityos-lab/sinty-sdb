@@ -18,13 +18,10 @@ stored key alone, with no code.
 ## Availability
 
 The bridge is off by default and never runs on its own. `sdbd` starts only when
-both switches are on:
-
-- Developer options are enabled in Settings (marker `/etc/atom/dev.enabled`).
-- The bridge itself is switched on (marker `/var/lib/sinty-sdb/enabled`).
-
-Turn either off and the daemon stops, so a device carries no network listener
-until the owner asks for one.
+the owner switches the bridge on in Settings, which creates the persistent
+device-policy marker `/var/lib/sinty-sdb/enabled`. Switching it off removes the
+marker and stops the daemon, so a device carries no network listener until the
+owner asks for one.
 
 ## Commands
 

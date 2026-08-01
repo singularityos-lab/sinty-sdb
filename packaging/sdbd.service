@@ -1,11 +1,7 @@
 [Unit]
 Description=Sinty Debug Bridge daemon
-# The bridge exists only on a development image. This condition is the gate, not
-# the Settings switch: a unit that could be started by hand while dev is locked
-# would make the switch the only thing standing between a locked device and an
-# open network listener. sdbd enforces the same check itself, so neither side is
-# load-bearing alone.
-ConditionPathExists=/etc/atom/dev.enabled
+# The owner opt-in is enforced by both the unit and sdbd. A release image ships
+# the control surface, but no listener exists until the owner enables it.
 ConditionPathExists=/var/lib/sinty-sdb/enabled
 After=network.target
 Wants=network.target

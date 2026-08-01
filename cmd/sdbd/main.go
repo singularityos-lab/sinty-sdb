@@ -2,10 +2,9 @@
 // network channel development hosts pair with, and a local socket the Settings
 // and recovery UIs drive that pairing from.
 //
-// It exists only on a development image. The marker at /etc/atom/dev.enabled is
-// the first level of the permission model, and the strongest one: where the
-// marker is absent sdbd does not run at all, so there is no port to defend
-// rather than a port defended well.
+// It is off by default and starts only after the owner enables it in Settings.
+// The opt-in marker is persistent device policy, not an image-build marker, so
+// a release image can expose the control without opening a listener by default.
 package main
 
 import (
@@ -35,21 +34,11 @@ func run(args []string) int {
 	stateDir := fs.String("state-dir", "/var/lib/sinty-sdb", "directory holding the device identity and keystore")
 	socket := fs.String("socket", "/run/sinty-sdb.sock", "unix socket for the local control API")
 	listen := fs.String("listen", "", "TCP address to serve (default all interfaces on the SDB port)")
-	gate := fs.String("gate", "/etc/atom/dev.enabled", "development marker that must exist for sdbd to run")
 	optIn := fs.String("opt-in", "/var/lib/sinty-sdb/enabled", "per-bridge marker the owner turns on to allow the bridge to run")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
-	if _, err := os.Stat(*gate); err != nil {
-		fmt.Fprintf(os.Stderr, "sdbd: the debug bridge is available only on a development image (%s)\n", *gate)
-		return 1
-	}
-
-	// The bridge needs its own opt-out, kept separate from the development gate
-	// above. Turning the bridge off must not clear the development marker: that
-	// marker governs the whole image, and removing it would also take away the
-	// control that turns the bridge back on, so off would be a one-way door.
 	// Absent means off, so a fresh image carries no listener until the owner asks.
 	if _, err := os.Stat(*optIn); err != nil {
 		fmt.Fprintf(os.Stderr, "sdbd: the debug bridge has not been turned on (%s)\n", *optIn)
@@ -94,7 +83,7 @@ func run(args []string) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	go watchGates(ctx, stop, time.Second, *gate, *optIn)
+	go watchGates(ctx, stop, time.Second, *optIn)
 
 	fmt.Fprintf(os.Stderr, "sdbd: device key %s\n", keys.Display(id.Fingerprint()))
 
