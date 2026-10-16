@@ -138,6 +138,13 @@ func serveShell(st *mux.Stream, cfg Config) {
 	if rootRequested {
 		args = args[1:]
 	}
+	var pty *shell.Size
+	if len(args) > 0 {
+		if size, ok := shell.ParsePtyArg(args[0]); ok {
+			pty = &size
+			args = args[1:]
+		}
+	}
 	// The broker decides root: it refuses on a locked (not-rooted) device before
 	// any prompt, and only grants after a human confirms on an unlocked one.
 	granted := false
@@ -149,6 +156,10 @@ func serveShell(st *mux.Stream, cfg Config) {
 		// No logged-in user and no bridge account: nothing safe to drop to.
 		// Refuse rather than run the shell as the daemon's root.
 		_ = st.CloseWithCode(126)
+		return
+	}
+	if pty != nil {
+		_, _ = shell.ServePTY(st, args, cred, *pty)
 		return
 	}
 	_, _ = shell.Serve(st, args, cred)

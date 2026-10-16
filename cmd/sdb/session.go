@@ -4,18 +4,21 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/singularityos-lab/sinty-sdb/internal/client"
 	"github.com/singularityos-lab/sinty-sdb/internal/forward"
 	"github.com/singularityos-lab/sinty-sdb/internal/keys"
 	"github.com/singularityos-lab/sinty-sdb/internal/logs"
 	"github.com/singularityos-lab/sinty-sdb/internal/mux"
+	"github.com/singularityos-lab/sinty-sdb/internal/protocol"
 	"github.com/singularityos-lab/sinty-sdb/internal/rforward"
 	"github.com/singularityos-lab/sinty-sdb/internal/shell"
 	"github.com/singularityos-lab/sinty-sdb/internal/transfer"
@@ -32,20 +35,26 @@ func dialDevice(dir, addr string) (*mux.Session, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	var target client.Device
-	if addr == "" {
-		target, err = known.Only()
-	} else {
-		target, err = known.Lookup(addr)
-	}
-	if err != nil {
-		return nil, nil, err
-	}
 	id, err := keys.LoadOrCreate(cfg, "host")
 	if err != nil {
 		return nil, nil, err
 	}
-	conn, err := client.New(id).Dial(target.Address, target.Fingerprint)
+	c := client.New(id)
+	var conn *protocol.Conn
+	if addr == "" && len(known.List()) > 1 {
+		conn, err = dialOnlyReachable(c, known.List())
+	} else {
+		var target client.Device
+		if addr == "" {
+			target, err = known.Only()
+		} else {
+			target, err = known.Lookup(addr)
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		conn, err = c.Dial(target.Address, target.Fingerprint)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
@@ -55,6 +64,42 @@ func dialDevice(dir, addr string) (*mux.Session, func(), error) {
 		return nil, nil, err
 	}
 	return sess, func() { sess.Close(); conn.Close() }, nil
+}
+
+func dialOnlyReachable(c *client.Client, devices []client.Device) (*protocol.Conn, error) {
+	type reached struct {
+		conn *protocol.Conn
+		addr string
+	}
+	results := make(chan *reached, len(devices))
+	for _, d := range devices {
+		go func(d client.Device) {
+			conn, err := c.Dial(d.Address, d.Fingerprint)
+			if err != nil {
+				results <- nil
+				return
+			}
+			results <- &reached{conn, d.Address}
+		}(d)
+	}
+	var up []*reached
+	for range devices {
+		if r := <-results; r != nil {
+			up = append(up, r)
+		}
+	}
+	switch len(up) {
+	case 0:
+		return nil, errors.New("none of the paired devices is reachable")
+	case 1:
+		return up[0].conn, nil
+	}
+	addrs := make([]string, 0, len(up))
+	for _, r := range up {
+		addrs = append(addrs, r.addr)
+		r.conn.Close()
+	}
+	return nil, fmt.Errorf("several paired devices are online (%s), name one with -addr", strings.Join(addrs, ", "))
 }
 
 func cmdShell(args []string) int {
@@ -72,12 +117,20 @@ func cmdShell(args []string) int {
 	defer done()
 
 	open := fs.Args()
+	interactive := len(open) == 0 && isTerminal(os.Stdin.Fd()) && isTerminal(os.Stdout.Fd())
+	if interactive {
+		open = append([]string{termSize(os.Stdout.Fd()).Arg()}, open...)
+	}
 	if *root {
 		open = append([]string{shell.RootArg}, open...)
 	}
 	st, err := sess.Open(shell.StreamKind, open...)
 	if err != nil {
 		return fail(err)
+	}
+	if interactive {
+		restore := makeRaw(os.Stdin.Fd())
+		defer restore()
 	}
 	go func() {
 		_, _ = io.Copy(st, os.Stdin)

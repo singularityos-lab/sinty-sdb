@@ -12,7 +12,6 @@ package shell
 
 import (
 	"io"
-	"os"
 	"os/exec"
 	"syscall"
 
@@ -78,7 +77,10 @@ type closer interface {
 // credential, which is how a non-root shell drops from sdbd's root to the
 // bridge user. It returns the exit code and any error starting the command.
 func Serve(st closer, args []string, cred *syscall.Credential) (int, error) {
-	cmd := command(args)
+	acct := accountFor(cred)
+	cmd := command(args, acct)
+	cmd.Dir = acct.workdir()
+	cmd.Env = acct.env("")
 	if cred != nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: cred}
 	}
@@ -117,15 +119,45 @@ func Serve(st closer, args []string, cred *syscall.Credential) (int, error) {
 	return code, nil
 }
 
-func command(args []string) *exec.Cmd {
+func command(args []string, acct account) *exec.Cmd {
 	if len(args) == 0 {
-		shell := os.Getenv("SHELL")
-		if shell == "" {
-			shell = "/bin/sh"
-		}
-		return exec.Command(shell)
+		return exec.Command(acct.shell)
 	}
 	return exec.Command(args[0], args[1:]...)
+}
+
+func ServePTY(st closer, args []string, cred *syscall.Credential, size Size) (int, error) {
+	master, slave, err := openPTY(size)
+	if err != nil {
+		_ = st.CloseWithCode(127)
+		return 127, err
+	}
+	defer master.Close()
+	acct := accountFor(cred)
+	cmd := command(args, acct)
+	cmd.Dir = acct.workdir()
+	cmd.Env = acct.env("xterm-256color")
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0, Credential: cred}
+	if err := cmd.Start(); err != nil {
+		slave.Close()
+		_ = st.CloseWithCode(127)
+		return 127, err
+	}
+	slave.Close()
+	go func() { _, _ = io.Copy(master, st) }()
+	_, _ = io.Copy(st, master)
+	err = cmd.Wait()
+	code := 0
+	if err != nil {
+		if exit, ok := err.(*exec.ExitError); ok {
+			code = exit.ExitCode()
+		} else {
+			code = 1
+		}
+	}
+	_ = st.CloseWithCode(code)
+	return code, nil
 }
 
 // ServeStream adapts a *mux.Stream to Serve with no credential, running as the
