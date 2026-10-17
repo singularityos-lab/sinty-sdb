@@ -6,15 +6,17 @@ package shell
 import (
 	"bufio"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 )
 
 type account struct {
-	name  string
-	home  string
-	shell string
+	name    string
+	home    string
+	shell   string
+	runtime string
 }
 
 func lookupAccount(passwd string, uid uint32) (account, bool) {
@@ -56,7 +58,22 @@ func accountFor(cred *syscall.Credential) account {
 	if a.shell == "" {
 		a.shell = "/bin/sh"
 	}
+	a.runtime = runtimeDir("/run/user", uid)
 	return a
+}
+
+// runtimeDir returns the account's runtime directory under root when it
+// exists and belongs to uid, so a shell joins the user's running session.
+func runtimeDir(root string, uid uint32) string {
+	p := filepath.Join(root, strconv.FormatUint(uint64(uid), 10))
+	st, err := os.Stat(p)
+	if err != nil || !st.IsDir() {
+		return ""
+	}
+	if s, ok := st.Sys().(*syscall.Stat_t); !ok || s.Uid != uid {
+		return ""
+	}
+	return p
 }
 
 func (a account) env(term string) []string {
@@ -72,6 +89,9 @@ func (a account) env(term string) []string {
 	}
 	if term != "" {
 		env = append(env, "TERM="+term)
+	}
+	if a.runtime != "" {
+		env = append(env, "XDG_RUNTIME_DIR="+a.runtime)
 	}
 	return env
 }

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -72,5 +73,31 @@ func TestServePTYRunsInHome(t *testing.T) {
 	home, _ := os.UserHomeDir()
 	if code != 0 || !strings.Contains(st.out.String(), "/") {
 		t.Fatalf("exit %d, output %q (home %s)", code, st.out.String(), home)
+	}
+}
+
+func TestRuntimeDirBelongsToTheAccount(t *testing.T) {
+	root := t.TempDir()
+	uid := uint32(os.Getuid())
+	own := filepath.Join(root, strconv.FormatUint(uint64(uid), 10))
+	if err := os.Mkdir(own, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got := runtimeDir(root, uid); got != own {
+		t.Fatalf("own runtime dir: got %q", got)
+	}
+	if got := runtimeDir(root, uid+1); got != "" {
+		t.Fatalf("a missing runtime dir must be empty, got %q", got)
+	}
+	other := filepath.Join(root, strconv.FormatUint(uint64(uid+2), 10))
+	if err := os.Mkdir(other, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got := runtimeDir(root, uid+2); got != "" {
+		t.Fatalf("a runtime dir owned by someone else must be empty, got %q", got)
+	}
+	env := strings.Join(account{name: "prova", home: "/", shell: "/bin/sh", runtime: own}.env(""), "\n")
+	if !strings.Contains(env, "XDG_RUNTIME_DIR="+own) {
+		t.Fatalf("env lacks the runtime dir: %s", env)
 	}
 }
