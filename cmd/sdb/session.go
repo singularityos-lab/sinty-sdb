@@ -117,7 +117,7 @@ func cmdShell(args []string) int {
 	defer done()
 
 	open := fs.Args()
-	interactive := len(open) == 0 && isTerminal(os.Stdin.Fd()) && isTerminal(os.Stdout.Fd())
+	interactive := isTerminal(os.Stdin.Fd()) && isTerminal(os.Stdout.Fd())
 	if interactive {
 		open = append([]string{termSize(os.Stdout.Fd()).Arg()}, open...)
 	}
