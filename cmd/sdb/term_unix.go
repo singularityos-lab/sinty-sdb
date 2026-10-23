@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Mirko Brombin <brombin94@gmail.com>
 
@@ -12,7 +14,7 @@ import (
 
 func termios(fd uintptr) (syscall.Termios, bool) {
 	var t syscall.Termios
-	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fd, syscall.TCGETS, uintptr(unsafe.Pointer(&t)))
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fd, getTermios, uintptr(unsafe.Pointer(&t)))
 	return t, errno == 0
 }
 
@@ -42,8 +44,8 @@ func makeRaw(fd uintptr) func() {
 	raw.Cflag |= syscall.CS8
 	raw.Cc[syscall.VMIN] = 1
 	raw.Cc[syscall.VTIME] = 0
-	_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, fd, syscall.TCSETS, uintptr(unsafe.Pointer(&raw)))
+	_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, fd, setTermios, uintptr(unsafe.Pointer(&raw)))
 	return func() {
-		_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, fd, syscall.TCSETS, uintptr(unsafe.Pointer(&old)))
+		_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, fd, setTermios, uintptr(unsafe.Pointer(&old)))
 	}
 }
