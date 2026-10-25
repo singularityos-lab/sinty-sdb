@@ -40,6 +40,41 @@ func lookupAccount(passwd string, uid uint32) (account, bool) {
 	return account{}, false
 }
 
+func memberGroups(group, name string, primary uint32) []uint32 {
+	groups := []uint32{primary}
+	f, err := os.Open(group)
+	if err != nil {
+		return groups
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		fields := strings.Split(sc.Text(), ":")
+		if len(fields) < 4 {
+			continue
+		}
+		id, err := strconv.ParseUint(fields[2], 10, 32)
+		if err != nil || uint32(id) == primary {
+			continue
+		}
+		for _, member := range strings.Split(fields[3], ",") {
+			if member == name {
+				groups = append(groups, uint32(id))
+				break
+			}
+		}
+	}
+	return groups
+}
+
+func loginGroups(uid, gid uint32) []uint32 {
+	a, ok := lookupAccount("/etc/passwd", uid)
+	if !ok {
+		return []uint32{gid}
+	}
+	return memberGroups("/etc/group", a.name, gid)
+}
+
 func accountFor(cred *syscall.Credential) account {
 	uid := uint32(os.Getuid())
 	if cred != nil {

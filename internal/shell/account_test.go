@@ -101,3 +101,15 @@ func TestRuntimeDirBelongsToTheAccount(t *testing.T) {
 		t.Fatalf("env lacks the runtime dir: %s", env)
 	}
 }
+
+func TestMemberGroupsKeepsTheSessionGroups(t *testing.T) {
+	group := filepath.Join(t.TempDir(), "group")
+	data := "input:x:111:greeter,prova\nrender:x:1001:sinty\nsingularity-session:x:500:greeter,prova\nprova:!:1002:\n"
+	if err := os.WriteFile(group, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := memberGroups(group, "prova", 1002)
+	if len(got) != 3 || got[0] != 1002 || got[1] != 111 || got[2] != 500 {
+		t.Fatalf("got %v", got)
+	}
+}

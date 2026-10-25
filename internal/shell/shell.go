@@ -56,7 +56,7 @@ func (a Access) Resolve(rootRequested, rootGranted bool) (cred *syscall.Credenti
 		return nil, "root", true
 	}
 	if a.Login.UID != 0 {
-		return &syscall.Credential{Uid: a.Login.UID, Gid: a.Login.GID}, "user", true
+		return &syscall.Credential{Uid: a.Login.UID, Gid: a.Login.GID, Groups: loginGroups(a.Login.UID, a.Login.GID)}, "user", true
 	}
 	if a.Bridge.UID != 0 {
 		return &syscall.Credential{Uid: a.Bridge.UID, Gid: a.Bridge.GID}, "bridge", true
