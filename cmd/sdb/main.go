@@ -33,6 +33,8 @@ usage:
   sdb logs [unit]               stream the device's logs
   sdb assist                    run a read-only diagnostic assist session
   sdb forward <local> <device>  tunnel a local address to a device address
+  sdb ask <text...>             ask Sinty AI on the device and print the answer
+  sdb mcp                       serve the device's Sinty AI tools over MCP on stdio
 `
 
 func run(args []string) int {
@@ -59,6 +61,10 @@ func run(args []string) int {
 		return cmdForward(args[1:])
 	case "assist":
 		return cmdAssist(args[1:])
+	case "ask":
+		return cmdAsk(args[1:])
+	case "mcp":
+		return cmdMCP(args[1:])
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return 0
