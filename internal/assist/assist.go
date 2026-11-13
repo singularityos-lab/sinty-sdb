@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Mirko Brombin <brombin94@gmail.com>
 
-//go:build linux && amd64
+//go:build linux && (amd64 || arm64)
 
 // Package assist is the SDB assistance tier: a bounded, non-root session for
 // remote support that needs no rooting of the device. Its diagnostic tool is
@@ -13,17 +13,14 @@
 package assist
 
 import (
-	_ "embed"
 	"syscall"
 
 	"github.com/singularityos-lab/sinty-sdb/internal/inmem"
 	"github.com/singularityos-lab/sinty-sdb/internal/mux"
 )
 
-//go:generate sh -c "CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o probe.bin ./probe"
-
-//go:embed probe.bin
-var probe []byte
+//go:generate sh -c "CGO_ENABLED=0 GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o probe_amd64.bin ./probe"
+//go:generate sh -c "CGO_ENABLED=0 GOARCH=arm64 go build -trimpath -ldflags='-s -w' -o probe_arm64.bin ./probe"
 
 // StreamKind is the mux open-kind that routes to the assistance tier.
 const StreamKind = "assist"

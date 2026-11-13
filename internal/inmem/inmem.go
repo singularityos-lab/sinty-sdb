@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Mirko Brombin <brombin94@gmail.com>
 
-//go:build linux && amd64
+//go:build linux && (amd64 || arm64)
 
 // Package inmem runs a tool that lives only in memory. The tool bytes, embedded
 // in the signed daemon, are written into an anonymous in-memory file
@@ -23,7 +23,6 @@ import (
 
 // syscall numbers and flags not exposed by the stdlib on this arch.
 const (
-	sysMemfdCreate = 319 // linux/amd64
 	mfdAllowSealing = 0x0002
 	fAddSeals       = 1033
 	fGetSeals       = 1034
