@@ -9,8 +9,11 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/singularityos-lab/sinty-sdb/internal/assist"
@@ -238,5 +241,47 @@ func TestSessionDispatchesEveryKind(t *testing.T) {
 	logOut, _ := io.ReadAll(lg)
 	if string(logOut) != "log for sdbd" {
 		t.Fatalf("logs got %q, want %q", logOut, "log for sdbd")
+	}
+}
+
+func TestSessionPushIntoLoginHomeSkipsElevation(t *testing.T) {
+	me, err := user.Current()
+	if err != nil || me.HomeDir == "" || me.HomeDir == "/" {
+		t.Skip("no home for the current user")
+	}
+	uid, _ := strconv.ParseUint(me.Uid, 10, 32)
+	gid, _ := strconv.ParseUint(me.Gid, 10, 32)
+	if uid == 0 {
+		t.Skip("login identity cannot be root")
+	}
+	dir, err := os.MkdirTemp(me.HomeDir, "sdb-push-")
+	if err != nil {
+		t.Skip("home not writable")
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	c1, c2 := net.Pipe()
+	client := mux.NewSession(c1, false)
+	t.Cleanup(func() { client.Close() })
+	go session.Serve(c2, session.Config{
+		Root:      t.TempDir(),
+		Broker:    broker.New(mockBroker(t, false)),
+		Origin:    "sdb:test",
+		SessionID: "sess",
+		Access:    shell.Access{Login: shell.Identity{UID: uint32(uid), GID: uint32(gid)}},
+	})
+	local := filepath.Join(t.TempDir(), "src")
+	if err := os.WriteFile(local, []byte("clip"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "Videos-clip.mp4")
+	if err := transfer.Push(client, local, target); err != nil {
+		t.Fatalf("push into the login home failed: %v", err)
+	}
+	st, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sys, ok := st.Sys().(*syscall.Stat_t); ok && sys.Uid != uint32(uid) {
+		t.Fatalf("file owned by %d, want %d", sys.Uid, uid)
 	}
 }

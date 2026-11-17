@@ -11,7 +11,10 @@ package session
 
 import (
 	"io"
+	"os/user"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/singularityos-lab/sinty-sdb/internal/assist"
@@ -117,6 +120,10 @@ func servePush(st *mux.Stream, cfg Config) {
 		return
 	}
 	clean := filepath.Clean(remote)
+	if home := loginHome(cfg.Access.Login.UID); home != "" && within(home, clean) {
+		_ = transfer.ServePushAs(st, clean, cfg.Access.Login.UID, cfg.Access.Login.GID)
+		return
+	}
 	granted := false
 	if cfg.Broker != nil {
 		granted, _ = cfg.Broker.Elevate(broker.ActionWriteSystem, clean, cfg.Origin, cfg.SessionID)
@@ -163,4 +170,20 @@ func serveShell(st *mux.Stream, cfg Config) {
 		return
 	}
 	_, _ = shell.Serve(st, args, cred)
+}
+
+func loginHome(uid uint32) string {
+	if uid == 0 {
+		return ""
+	}
+	u, err := user.LookupId(strconv.FormatUint(uint64(uid), 10))
+	if err != nil || u.HomeDir == "" || u.HomeDir == "/" {
+		return ""
+	}
+	return filepath.Clean(u.HomeDir)
+}
+
+func within(dir, p string) bool {
+	rel, err := filepath.Rel(dir, p)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, "../")
 }
