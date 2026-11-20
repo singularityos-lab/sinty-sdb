@@ -94,8 +94,9 @@ func (m *Manager) SetTTL(ttl time.Duration) {
 	m.ttl = ttl
 }
 
-// Start opens a pairing window and returns the code to show on screen. Any
-// session already open is discarded, so there is never more than one live code.
+// Start opens a pairing window and returns the code to show on screen. A window
+// that is still live is reused with its code and pending host, so opening the
+// pairing screen after `sdb pair` has offered its key does not drop that key.
 func (m *Manager) Start() (string, time.Time, error) {
 	code, err := generateCode()
 	if err != nil {
@@ -103,9 +104,11 @@ func (m *Manager) Start() (string, time.Time, error) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	expires := m.now().Add(m.ttl)
-	m.s = &session{code: code, expiresAt: expires}
-	return code, expires, nil
+	m.sweep()
+	if m.s == nil {
+		m.s = &session{code: code, expiresAt: m.now().Add(m.ttl)}
+	}
+	return m.s.code, m.s.expiresAt, nil
 }
 
 // Cancel closes the pairing window.

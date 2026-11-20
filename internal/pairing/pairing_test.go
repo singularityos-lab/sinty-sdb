@@ -57,6 +57,7 @@ func TestCodeShape(t *testing.T) {
 			t.Fatal("code has no expiry")
 		}
 		seen[code] = true
+		m.Cancel()
 	}
 	// Not a randomness test, only a guard against a constant or a counter.
 	if len(seen) < 32 {
@@ -264,4 +265,27 @@ func wrongCode(code string) string {
 		return "111111"
 	}
 	return "000000"
+}
+
+func TestStartAfterHostOpenKeepsTheHost(t *testing.T) {
+	m, clk := newTestManager()
+	code, _, err := m.Open(hostFP, "laptop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, _, err := m.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != code {
+		t.Fatal("opening the pairing screen must keep the live code")
+	}
+	if err := m.Submit(hostFP, code); err != nil {
+		t.Fatalf("the host that offered its key first should pair: %v", err)
+	}
+	clk.advance(DefaultTTL)
+	fresh, _, err := m.Start()
+	if err != nil || fresh == "" {
+		t.Fatalf("a new window should open once the old one is gone: %v", err)
+	}
 }
