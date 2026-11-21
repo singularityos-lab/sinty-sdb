@@ -17,6 +17,7 @@ import (
 
 	"github.com/singularityos-lab/sinty-sdb/internal/client"
 	"github.com/singularityos-lab/sinty-sdb/internal/keys"
+	"github.com/singularityos-lab/sinty-sdb/internal/protocol"
 )
 
 func main() { os.Exit(run(os.Args[1:])) }
@@ -27,6 +28,8 @@ usage:
   sdb pair <address>            pair this machine with a device
   sdb devices                   list the devices this machine is paired with
   sdb revoke <label>            remove a paired host from a device's keyring
+  sdb diagnose                  show memory, pressure and blocked processes on the device
+  sdb reboot [--force]          restart the device; --force works when user space is stuck
   sdb shell [--root] [cmd...]   run a shell or command on the device
   sdb push <local> <remote>     copy a file to the device
   sdb pull <remote> <local>     copy a file from the device
@@ -49,6 +52,10 @@ func run(args []string) int {
 		return cmdDevices(args[1:])
 	case "revoke":
 		return cmdRevoke(args[1:])
+	case "diagnose":
+		return cmdDiagnose(args[1:])
+	case "reboot":
+		return cmdReboot(args[1:])
 	case "shell":
 		return cmdShell(args[1:])
 	case "push":
@@ -229,28 +236,7 @@ func cmdRevoke(args []string) int {
 	}
 	label := fs.Arg(0)
 
-	cfg, err := configDir(*dir)
-	if err != nil {
-		return fail(err)
-	}
-	known, err := client.OpenKnown(filepath.Join(cfg, "devices.json"))
-	if err != nil {
-		return fail(err)
-	}
-	var target client.Device
-	if *addr == "" {
-		target, err = known.Only()
-	} else {
-		target, err = known.Lookup(*addr)
-	}
-	if err != nil {
-		return fail(err)
-	}
-	id, err := keys.LoadOrCreate(cfg, "host")
-	if err != nil {
-		return fail(err)
-	}
-	conn, err := client.New(id).Dial(target.Address, target.Fingerprint)
+	conn, target, err := dialPaired(*dir, *addr)
 	if err != nil {
 		return fail(err)
 	}
@@ -259,6 +245,79 @@ func cmdRevoke(args []string) int {
 		return fail(err)
 	}
 	fmt.Printf("Revoked %s on %s.\n", label, target.Address)
+	return 0
+}
+
+func dialPaired(dir, addr string) (*protocol.Conn, client.Device, error) {
+	cfg, err := configDir(dir)
+	if err != nil {
+		return nil, client.Device{}, err
+	}
+	known, err := client.OpenKnown(filepath.Join(cfg, "devices.json"))
+	if err != nil {
+		return nil, client.Device{}, err
+	}
+	var target client.Device
+	if addr == "" {
+		target, err = known.Only()
+	} else {
+		target, err = known.Lookup(addr)
+	}
+	if err != nil {
+		return nil, client.Device{}, err
+	}
+	id, err := keys.LoadOrCreate(cfg, "host")
+	if err != nil {
+		return nil, client.Device{}, err
+	}
+	conn, err := client.New(id).Dial(target.Address, target.Fingerprint)
+	if err != nil {
+		return nil, client.Device{}, err
+	}
+	return conn, target, nil
+}
+
+func cmdDiagnose(args []string) int {
+	fs := flag.NewFlagSet("sdb diagnose", flag.ContinueOnError)
+	dir := fs.String("config-dir", "", "override the configuration directory")
+	addr := fs.String("addr", "", "device to act on (needed when several are paired)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	conn, _, err := dialPaired(*dir, *addr)
+	if err != nil {
+		return fail(err)
+	}
+	defer conn.Close()
+	report, err := client.Diagnose(conn)
+	if err != nil {
+		return fail(err)
+	}
+	fmt.Print(report)
+	return 0
+}
+
+func cmdReboot(args []string) int {
+	fs := flag.NewFlagSet("sdb reboot", flag.ContinueOnError)
+	dir := fs.String("config-dir", "", "override the configuration directory")
+	addr := fs.String("addr", "", "device to act on (needed when several are paired)")
+	force := fs.Bool("force", false, "restart through the kernel without waiting for init or services")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	conn, target, err := dialPaired(*dir, *addr)
+	if err != nil {
+		return fail(err)
+	}
+	defer conn.Close()
+	if err := client.Reboot(conn, *force); err != nil {
+		return fail(err)
+	}
+	if *force {
+		fmt.Printf("Forced restart sent to %s.\n", target.Address)
+	} else {
+		fmt.Printf("Restart sent to %s.\n", target.Address)
+	}
 	return 0
 }
 

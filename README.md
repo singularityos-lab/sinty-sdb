@@ -45,6 +45,19 @@ sdb forward -R <bind> <target>  reverse: the device binds and tunnels to the hos
 sdb assist                      run a read-only diagnostic session in memory
 ```
 
+When a device stops answering, two requests skip the session and run on the
+control connection alone, so they need nothing but sdbd and the kernel:
+
+```sh
+sdb diagnose                    memory, swap, pressure and blocked processes
+sdb reboot [--force]            restart through init, or with --force through sysrq
+```
+
+`--force` asks the kernel for an emergency sync, a read-only remount and a
+reboot, which still works when init and every service are stuck. sdbd keeps
+itself out of the OOM killer's reach and locked in memory so it can still take
+these requests while the rest of the system is thrashing.
+
 A shell runs at one of three tiers. By default it is the logged-in user, since a
 paired host is the owner's own machine on the owner's own device; with no one
 logged in it falls back to an isolated bridge account. `--root` is a root shell,

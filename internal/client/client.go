@@ -122,6 +122,21 @@ func Revoke(conn *protocol.Conn, label string) error {
 	return err
 }
 
+// Diagnose returns the device's health report.
+func Diagnose(conn *protocol.Conn) (string, error) {
+	resp, err := call(conn, protocol.Request{Op: protocol.OpDiagnose}, protocol.CallTimeout)
+	if err != nil {
+		return "", err
+	}
+	return resp.Report, nil
+}
+
+// Reboot asks the device to restart, through init or, when forced, through the kernel.
+func Reboot(conn *protocol.Conn, force bool) error {
+	_, err := call(conn, protocol.Request{Op: protocol.OpReboot, Force: force}, protocol.CallTimeout)
+	return err
+}
+
 // normalise appends the default port when the address carries none.
 func normalise(addr string) string {
 	if _, _, err := net.SplitHostPort(addr); err == nil {

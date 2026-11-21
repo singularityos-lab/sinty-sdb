@@ -45,6 +45,8 @@ func run(args []string) int {
 		return 1
 	}
 
+	harden()
+
 	addr := *listen
 	if addr == "" {
 		addr = net.JoinHostPort("", strconv.Itoa(protocol.DefaultPort))

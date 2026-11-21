@@ -140,15 +140,17 @@ type Config struct {
 	Pairing  *pairing.Manager
 	Root     string
 	Log      *slog.Logger
+	Rescue   *Rescue
 }
 
 // Server is the device daemon.
 type Server struct {
-	id    *keys.Identity
-	store *keystore.Store
-	pair  *pairing.Manager
-	root  string
-	log   *slog.Logger
+	id     *keys.Identity
+	store  *keystore.Store
+	pair   *pairing.Manager
+	root   string
+	log    *slog.Logger
+	rescue Rescue
 
 	mu   sync.Mutex
 	live map[net.Conn]string
@@ -173,13 +175,18 @@ func New(cfg Config) (*Server, error) {
 	if log == nil {
 		log = slog.Default()
 	}
+	rescue := DefaultRescue()
+	if cfg.Rescue != nil {
+		rescue = *cfg.Rescue
+	}
 	return &Server{
-		id:    cfg.Identity,
-		store: cfg.Store,
-		pair:  cfg.Pairing,
-		root:  cfg.Root,
-		log:   log,
-		live:  make(map[net.Conn]string),
+		id:     cfg.Identity,
+		store:  cfg.Store,
+		pair:   cfg.Pairing,
+		root:   cfg.Root,
+		log:    log,
+		rescue: rescue,
+		live:   make(map[net.Conn]string),
 	}, nil
 }
 
@@ -399,6 +406,20 @@ func (s *Server) dispatch(peer string, trusted bool, req protocol.Request) (prot
 		}
 		s.log.Info("sdb host revoked", "label", req.Label)
 		return protocol.Response{OK: true}, host.Fingerprint
+
+	case protocol.OpDiagnose:
+		if !trusted {
+			return refuse(errors.New("this host is not paired with the device")), ""
+		}
+		return protocol.Response{OK: true, Report: s.rescue.Diagnose()}, ""
+
+	case protocol.OpReboot:
+		if !trusted {
+			return refuse(errors.New("this host is not paired with the device")), ""
+		}
+		s.log.Warn("sdb reboot requested", "force", req.Force, "peer", keys.Display(peer))
+		s.rescue.Restart(req.Force, func(msg string, args ...any) { s.log.Error(msg, args...) })
+		return protocol.Response{OK: true}, ""
 
 	default:
 		return refuse(fmt.Errorf("unknown request %q", req.Op)), ""

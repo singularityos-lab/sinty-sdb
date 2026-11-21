@@ -40,6 +40,8 @@ const (
 	OpHostsList   = "hosts-list"
 	OpHostsRevoke = "hosts-revoke"
 	OpSession     = "session"
+	OpDiagnose    = "diagnose"
+	OpReboot      = "reboot"
 )
 
 // Deadlines bounding a connection. Pairing waits on a human typing a code, so
@@ -55,6 +57,7 @@ type Request struct {
 	Op    string `json:"op"`
 	Label string `json:"label,omitempty"`
 	Code  string `json:"code,omitempty"`
+	Force bool   `json:"force,omitempty"`
 }
 
 // Response is the device's reply. Error carries a message meant for the person
@@ -64,6 +67,7 @@ type Response struct {
 	Error       string          `json:"error,omitempty"`
 	Fingerprint string          `json:"fingerprint,omitempty"`
 	Hosts       []keystore.Host `json:"hosts,omitempty"`
+	Report      string          `json:"report,omitempty"`
 }
 
 // Conn is a framed connection over TLS.
