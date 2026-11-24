@@ -26,6 +26,8 @@ import (
 	"github.com/singularityos-lab/sinty-sdb/internal/keystore"
 	"github.com/singularityos-lab/sinty-sdb/internal/pairing"
 	"github.com/singularityos-lab/sinty-sdb/internal/protocol"
+
+	"github.com/singularityos-lab/libsingularity/src/system/core/go/netkind"
 )
 
 func main() { os.Exit(run(os.Args[1:])) }
@@ -88,7 +90,7 @@ func run(args []string) int {
 		Store:    store,
 		Pairing:  pair,
 		Root:     root,
-		Admit:    daemon.PrivateNetworkOnly(daemon.NetworkKindPath, daemon.LinkOf),
+		Admit:    netkind.Admit(netkind.Dir, netkind.LinkOf),
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "sdbd:", err)

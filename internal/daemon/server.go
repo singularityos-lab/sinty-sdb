@@ -141,7 +141,7 @@ type Config struct {
 	Root     string
 	Log      *slog.Logger
 	Rescue   *Rescue
-	Admit    func(local, remote net.Addr) bool
+	Admit    func(local net.Addr) bool
 }
 
 // Server is the device daemon.
@@ -152,7 +152,7 @@ type Server struct {
 	root   string
 	log    *slog.Logger
 	rescue Rescue
-	admit  func(local, remote net.Addr) bool
+	admit  func(local net.Addr) bool
 
 	mu   sync.Mutex
 	live map[net.Conn]string
@@ -276,7 +276,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 			}
 			return err
 		}
-		if s.admit != nil && !s.admit(conn.LocalAddr(), conn.RemoteAddr()) {
+		if s.admit != nil && !s.admit(conn.LocalAddr()) {
 			s.log.Info("sdb connection refused on a public network", "from", conn.RemoteAddr().String())
 			_ = conn.Close()
 			continue
