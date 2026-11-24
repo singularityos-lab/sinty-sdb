@@ -12,6 +12,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/mirkobrombin/atomloops/sealedlog"
 	"net"
 	"os"
 	"os/signal"
@@ -46,6 +47,8 @@ func run(args []string) int {
 	}
 
 	harden()
+	sealed, _ := sealedlog.Open("sdb")
+	sealed.Log("start")
 
 	addr := *listen
 	if addr == "" {
@@ -72,10 +75,18 @@ func run(args []string) int {
 		fmt.Fprintln(os.Stderr, "sdbd:", err)
 		return 1
 	}
+	pair := pairing.NewManager()
+	pair.OnDenied = func(attempts int, locked bool) {
+		lock := uint64(0)
+		if locked {
+			lock = 1
+		}
+		sealed.Log("denied", uint64(attempts), lock)
+	}
 	srv, err := daemon.New(daemon.Config{
 		Identity: id,
 		Store:    store,
-		Pairing:  pairing.NewManager(),
+		Pairing:  pair,
 		Root:     root,
 	})
 	if err != nil {
@@ -88,6 +99,7 @@ func run(args []string) int {
 	go watchGates(ctx, stop, time.Second, *optIn)
 
 	fmt.Fprintf(os.Stderr, "sdbd: device key %s\n", keys.Display(id.Fingerprint()))
+	sealed.Log("ready")
 
 	errs := make(chan error, 2)
 	go func() { errs <- srv.ServeControl(ctx, *socket) }()

@@ -289,3 +289,23 @@ func TestStartAfterHostOpenKeepsTheHost(t *testing.T) {
 		t.Fatalf("a new window should open once the old one is gone: %v", err)
 	}
 }
+
+func TestWrongCodesAreReported(t *testing.T) {
+	m, clk, code := startPaired(t)
+	bad := wrongCode(code)
+	type report struct {
+		attempts int
+		locked   bool
+	}
+	var seen []report
+	m.OnDenied = func(attempts int, locked bool) { seen = append(seen, report{attempts, locked}) }
+	for i := 0; i < maxAttempts; i++ {
+		if st := m.State(); !st.LockedUntil.IsZero() {
+			clk.advance(st.LockedUntil.Sub(clk.t))
+		}
+		m.Submit(hostFP, bad)
+	}
+	if len(seen) != maxAttempts || seen[0] != (report{1, false}) || seen[maxAttempts-1] != (report{maxAttempts, true}) {
+		t.Fatalf("reports %v", seen)
+	}
+}

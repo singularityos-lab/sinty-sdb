@@ -69,6 +69,8 @@ type session struct {
 
 // Manager owns at most one pairing session at a time.
 type Manager struct {
+	OnDenied func(attempts int, locked bool)
+
 	mu  sync.Mutex
 	s   *session
 	now func() time.Time
@@ -208,15 +210,24 @@ func (m *Manager) Submit(fingerprint, code string) error {
 	}
 	if subtle.ConstantTimeCompare([]byte(m.s.code), []byte(code)) != 1 {
 		m.s.attempts++
-		if m.s.attempts >= maxAttempts {
+		attempts := m.s.attempts
+		if attempts >= maxAttempts {
 			m.s = nil
+			m.denied(attempts, true)
 			return ErrLocked
 		}
-		m.s.lockedUntil = m.now().Add(backoff(m.s.attempts))
+		m.s.lockedUntil = m.now().Add(backoff(attempts))
+		m.denied(attempts, false)
 		return ErrBadCode
 	}
 	m.s = nil
 	return nil
+}
+
+func (m *Manager) denied(attempts int, locked bool) {
+	if m.OnDenied != nil {
+		m.OnDenied(attempts, locked)
+	}
 }
 
 // PendingFingerprint returns the key currently offered, if any.
