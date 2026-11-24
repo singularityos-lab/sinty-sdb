@@ -88,6 +88,7 @@ func run(args []string) int {
 		Store:    store,
 		Pairing:  pair,
 		Root:     root,
+		Admit:    daemon.PrivateNetworkOnly(daemon.NetworkKindPath, daemon.LinkOf),
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "sdbd:", err)
