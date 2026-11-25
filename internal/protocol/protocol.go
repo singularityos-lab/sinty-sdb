@@ -126,21 +126,39 @@ func (c *Conn) write(v any) error {
 // zero Op would quietly become an unknown-op refusal that hides the real cause.
 func (c *Conn) ReadRequest() (Request, error) {
 	var req Request
-	err := c.read(&req)
+	err := c.read(&req, maxRequest)
 	return req, err
 }
 
 // ReadResponse reads one reply frame.
 func (c *Conn) ReadResponse() (Response, error) {
 	var resp Response
-	err := c.read(&resp)
+	err := c.read(&resp, maxResponse)
 	return resp, err
 }
 
-func (c *Conn) read(v any) error {
-	line, err := c.r.ReadBytes('\n')
-	if err != nil && len(line) == 0 {
-		return err
+const (
+	maxRequest  = 64 << 10
+	maxResponse = 16 << 20
+)
+
+var errFrameTooLarge = errors.New("frame too large")
+
+func (c *Conn) read(v any, limit int) error {
+	var line []byte
+	for {
+		chunk, err := c.r.ReadSlice('\n')
+		if len(line)+len(chunk) > limit {
+			return errFrameTooLarge
+		}
+		line = append(line, chunk...)
+		if err == bufio.ErrBufferFull {
+			continue
+		}
+		if err != nil && len(line) == 0 {
+			return err
+		}
+		break
 	}
 	if err := json.Unmarshal(line, v); err != nil {
 		return fmt.Errorf("unparsable frame: %w", err)
