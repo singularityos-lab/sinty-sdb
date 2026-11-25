@@ -1,4 +1,6 @@
 github.com/mirkobrombin/atomloops v0.2.10-0.20261124173743-7a06152b95de h1:PEyH5/hnvXsELuZ4Nxrh5jSIoRD4nT3326VLjPImGcg=
 github.com/mirkobrombin/atomloops v0.2.10-0.20261124173743-7a06152b95de/go.mod h1:18MprTBFQSIFeYCnzhsK7grT9e3E7Yxao1gE+mG4bgY=
-github.com/singularityos-lab/libsingularity/src/system/core/go v0.0.0-20261124184342-6a03a013db08 h1:P2mo0856OA+cZNJ+LwitOJNvjH6JmFk0+4i4njNSwc8=
-github.com/singularityos-lab/libsingularity/src/system/core/go v0.0.0-20261124184342-6a03a013db08/go.mod h1:dSqcOahINHGHr1y+V1mZykthPhfP8cqRCy+y1pwYcwY=
+github.com/singularityos-lab/libsingularity/src/system/core/go v0.0.0-20261125221814-9be3a9dc4476 h1:wV3Fg5X58VNcwgcG6Na18hV+pXijQRPVZ1mioX9TfcY=
+github.com/singularityos-lab/libsingularity/src/system/core/go v0.0.0-20261125221814-9be3a9dc4476/go.mod h1:xcDhgqbRfCWp+tX052LmN5JltZ72SWiTnFTm0jURylo=
+golang.org/x/sys v0.27.0 h1:wBqf8DvsY9Y/2P8gAfPDEYNuS30J4lPHJxXSb/nJZ+s=
+golang.org/x/sys v0.27.0/go.mod h1:/VUhepiaJMQUp4+oa/7Zr1D23ma6VTLIYjOOTFZPUcA=
