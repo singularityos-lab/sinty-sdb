@@ -45,6 +45,8 @@ const (
 	// DefaultWindow is the initial number of bytes a peer may send on a new
 	// stream before it must wait for a window grant.
 	DefaultWindow = 64 * 1024
+	// MaxWindow bounds how far grants may raise a send window.
+	MaxWindow = 1 << 30
 )
 
 // ErrFrameTooLarge is returned when a payload exceeds the uint24 length field.
@@ -116,11 +118,14 @@ func ReadFrame(r io.Reader) (Frame, error) {
 type Session struct {
 	conn io.ReadWriteCloser
 
-	wmu sync.Mutex // serializes frame writes
+	wmu    sync.Mutex // serializes frame writes
+	openMu sync.Mutex // sends OPEN frames in stream id order
 
 	mu      sync.Mutex
 	streams map[uint32]*Stream
 	nextID  uint32
+	peerID  uint32
+	skipped map[uint32]bool
 	step    uint32
 	initWin int
 	err     error
@@ -138,14 +143,17 @@ func NewSession(conn io.ReadWriteCloser, server bool) *Session {
 	s := &Session{
 		conn:    conn,
 		streams: make(map[uint32]*Stream),
+		skipped: make(map[uint32]bool),
 		initWin: DefaultWindow,
 		accept:  make(chan *Stream, 16),
 		done:    make(chan struct{}),
 	}
 	if server {
 		s.nextID = 2
+		s.peerID = 1
 	} else {
 		s.nextID = 1
+		s.peerID = 2
 	}
 	s.step = 2
 	go s.readLoop()
@@ -163,6 +171,8 @@ func (s *Session) SetInitialWindow(n int) {
 
 // Open starts a new stream for the given kind and arguments.
 func (s *Session) Open(kind string, args ...string) (*Stream, error) {
+	s.openMu.Lock()
+	defer s.openMu.Unlock()
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -199,11 +209,12 @@ func (s *Session) Close() error { return s.fail(ErrSessionClosed) }
 
 func (s *Session) newStreamLocked(id uint32, kind string, args []string) *Stream {
 	st := &Stream{
-		id:     id,
-		s:      s,
-		kind:   kind,
-		args:   args,
-		window: s.initWin,
+		id:      id,
+		s:       s,
+		kind:    kind,
+		args:    args,
+		window:  s.initWin,
+		recvWin: s.initWin,
 	}
 	st.dataReady = sync.NewCond(&st.mu)
 	st.winReady = sync.NewCond(&st.mu)
@@ -243,9 +254,9 @@ func (s *Session) dispatch(f Frame) error {
 			return fmt.Errorf("mux: bad open payload: %w", err)
 		}
 		s.mu.Lock()
-		if _, exists := s.streams[f.StreamID]; exists {
+		if !s.claimPeerIDLocked(f.StreamID) {
 			s.mu.Unlock()
-			return fmt.Errorf("mux: open of in-use stream %d", f.StreamID)
+			return fmt.Errorf("mux: peer opened stream %d out of turn", f.StreamID)
 		}
 		st := s.newStreamLocked(f.StreamID, op.Kind, op.Args)
 		s.mu.Unlock()
@@ -258,7 +269,13 @@ func (s *Session) dispatch(f Frame) error {
 
 	s.mu.Lock()
 	st, ok := s.streams[f.StreamID]
+	retired := !ok && s.retiredLocked(f.StreamID)
 	s.mu.Unlock()
+	if retired {
+		// Both ends closed this stream; the peer may still be granting
+		// window for data it read before it saw our close.
+		return nil
+	}
 	if !ok {
 		// A frame for a stream that was never opened is a protocol error,
 		// not something to ignore: it means the peer and we disagree about
@@ -268,22 +285,75 @@ func (s *Session) dispatch(f Frame) error {
 
 	switch f.Type {
 	case FrameData:
-		st.deliver(f.Payload)
+		if err := st.deliver(f.Payload); err != nil {
+			return err
+		}
 	case FrameClose:
 		code := 0
 		if len(f.Payload) == 4 {
 			code = int(int32(binary.BigEndian.Uint32(f.Payload)))
 		}
 		st.remoteClose(code)
+		s.retire(st)
 	case FrameWindow:
 		if len(f.Payload) != 4 {
 			return fmt.Errorf("mux: window frame with %d byte payload", len(f.Payload))
 		}
-		st.grant(int(binary.BigEndian.Uint32(f.Payload)))
+		if err := st.grant(int(binary.BigEndian.Uint32(f.Payload))); err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf("mux: unknown frame type %d", f.Type)
 	}
 	return nil
+}
+
+// maxSkipped bounds how many peer stream ids may still arrive out of order;
+// concurrent opens on the peer can put their OPEN frames on the wire swapped.
+const maxSkipped = 64
+
+// claimPeerIDLocked accepts a stream id opened by the peer once: ids come from
+// the peer's parity, grow, and may only arrive late if one above them came first.
+func (s *Session) claimPeerIDLocked(id uint32) bool {
+	if id%2 != s.peerID%2 || id > 1<<31 {
+		return false
+	}
+	if id < s.peerID {
+		if !s.skipped[id] {
+			return false
+		}
+		delete(s.skipped, id)
+		return true
+	}
+	if int(id-s.peerID)/2+len(s.skipped) > maxSkipped {
+		return false
+	}
+	for gap := s.peerID; gap < id; gap += 2 {
+		s.skipped[gap] = true
+	}
+	s.peerID = id + 2
+	return true
+}
+
+// retiredLocked reports whether id named a stream that existed and is gone.
+func (s *Session) retiredLocked(id uint32) bool {
+	if id%2 == s.nextID%2 {
+		return id < s.nextID
+	}
+	return id < s.peerID && !s.skipped[id]
+}
+
+// retire forgets a stream once both ends have closed it. The caller may still
+// hold it and read what is buffered.
+func (s *Session) retire(st *Stream) {
+	st.mu.Lock()
+	done := st.readEnd && st.writeEnd
+	st.mu.Unlock()
+	if done {
+		s.mu.Lock()
+		delete(s.streams, st.id)
+		s.mu.Unlock()
+	}
 }
 
 func (s *Session) fail(err error) error {
@@ -337,6 +407,7 @@ type Stream struct {
 	dataReady *sync.Cond
 	winReady  *sync.Cond
 	window    int
+	recvWin   int
 	readEnd   bool // peer sent CLOSE
 	writeEnd  bool // we sent CLOSE
 	exitCode  int
@@ -356,11 +427,19 @@ func (st *Stream) ExitCode() (int, bool) {
 	return st.exitCode, st.haveExit
 }
 
-func (st *Stream) deliver(p []byte) {
+func (st *Stream) deliver(p []byte) error {
 	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.readEnd {
+		return fmt.Errorf("mux: data after close on stream %d", st.id)
+	}
+	if len(p) > st.recvWin {
+		return fmt.Errorf("mux: stream %d sent %d bytes past its window", st.id, len(p)-st.recvWin)
+	}
+	st.recvWin -= len(p)
 	st.inbuf.Write(p)
 	st.dataReady.Broadcast()
-	st.mu.Unlock()
+	return nil
 }
 
 func (st *Stream) remoteClose(code int) {
@@ -375,11 +454,15 @@ func (st *Stream) remoteClose(code int) {
 	st.mu.Unlock()
 }
 
-func (st *Stream) grant(n int) {
+func (st *Stream) grant(n int) error {
 	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.window+n > MaxWindow {
+		return fmt.Errorf("mux: stream %d window grown past %d", st.id, MaxWindow)
+	}
 	st.window += n
 	st.winReady.Broadcast()
-	st.mu.Unlock()
+	return nil
 }
 
 // Read implements io.Reader. It blocks until data arrives or the stream ends,
@@ -400,9 +483,13 @@ func (st *Stream) Read(p []byte) (int, error) {
 		st.dataReady.Wait()
 	}
 	n, _ := st.inbuf.Read(p)
+	reopen := n > 0 && !st.readEnd
+	if reopen {
+		st.recvWin += n
+	}
 	st.mu.Unlock()
 
-	if n > 0 {
+	if reopen {
 		var b [4]byte
 		binary.BigEndian.PutUint32(b[:], uint32(n))
 		_ = st.s.writeFrame(Frame{StreamID: st.id, Type: FrameWindow, Payload: b[:]})
@@ -463,6 +550,7 @@ func (st *Stream) CloseWithCode(code int) error {
 	}
 	st.writeEnd = true
 	st.mu.Unlock()
+	defer st.s.retire(st)
 
 	var payload []byte
 	if code != 0 {
