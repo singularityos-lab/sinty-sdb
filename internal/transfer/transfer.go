@@ -22,7 +22,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"github.com/singularityos-lab/sinty-sdb/internal/mux"
 )
@@ -177,7 +176,13 @@ func ServePushSystem(st *mux.Stream, absPath string) error {
 		_ = st.CloseWithCode(1)
 		return err
 	}
-	f, err := os.OpenFile(clean, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0644)
+	f, err := createNoSymlinks(clean)
+	if errors.Is(err, ErrOutsideRoot) {
+		if fi, lerr := os.Lstat(clean); lerr != nil || fi.Mode()&os.ModeSymlink == 0 {
+			_ = st.CloseWithCode(2)
+			return err
+		}
+	}
 	if err != nil {
 		_ = st.CloseWithCode(3)
 		return err

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/singularityos-lab/sinty-sdb/internal/mux"
 )
@@ -212,5 +213,53 @@ func TestPushTraversalDenied(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(filepath.Dir(root), "escape.bin")); err == nil {
 		t.Fatal("a file escaped the root")
+	}
+}
+
+func TestServePushSystemRefusesParentSwappedDuringTransfer(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real")
+	approved := filepath.Join(dir, "approved")
+	for _, d := range []string{real, approved} {
+		if err := os.Mkdir(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target := filepath.Join(approved, "f")
+	c1, c2 := net.Pipe()
+	client := mux.NewSession(c1, false)
+	server := mux.NewSession(c2, true)
+	t.Cleanup(func() { client.Close(); server.Close() })
+	checked := make(chan struct{})
+	go func() {
+		st, err := server.Accept()
+		if err != nil {
+			return
+		}
+		close(checked)
+		_ = ServePushSystem(st, target)
+	}()
+	st, err := client.Open(KindPush, target)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	<-checked
+	time.Sleep(50 * time.Millisecond)
+	if err := os.Remove(approved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, approved); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	if err := writeHashed(st, []byte("x")); err != nil {
+		t.Fatalf("writeHashed: %v", err)
+	}
+	_ = st.Close()
+	_, _ = io.ReadAll(st)
+	if code, _ := st.ExitCode(); code == 0 {
+		t.Fatal("push through a parent swapped for a symlink succeeded")
+	}
+	if _, err := os.Stat(filepath.Join(real, "f")); err == nil {
+		t.Fatal("write landed through a parent swapped for a symlink")
 	}
 }
